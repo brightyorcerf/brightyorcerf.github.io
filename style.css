@@ -43,7 +43,7 @@ li{margin:0 0 var(--space-1)}
 li::marker{color:var(--faint)}
 
 /* home */
-.sky{margin:0 0 var(--space-4);padding:var(--space-4) var(--space-3);background:var(--panel);border:1px solid var(--rule);border-radius:8px;overflow:hidden;font-size:min(13px,1.7vw);line-height:1.25;color:var(--ink)}
+.sky{margin:0 0 var(--space-4);padding:var(--space-4) var(--space-3);background:var(--panel);border:1px solid var(--rule);border-radius:8px;overflow:hidden;font-size:min(9.2px,1.4vw);line-height:1.25;color:var(--ink)}
 .star{color:var(--star);text-shadow:0 0 6px var(--star);animation:twinkle 2.4s ease-in-out infinite alternate}
 .home h1{font-size:1.6rem;margin-bottom:var(--space-2)}
 .home h1:before{content:"~/";color:var(--faint)}
@@ -70,7 +70,7 @@ hr{border:0;border-top:1px dashed var(--rule);margin:var(--space-4) 0}
 
 @media(max-width:640px){
   body{padding:var(--space-4) var(--space-2) var(--space-5);font-size:14px}
-  .sky{padding:var(--space-2) var(--space-1);font-size:1.95vw}
+  .sky{padding:var(--space-2) var(--space-1);font-size:1.45vw}
   .home li{grid-template-columns:auto minmax(0,1fr);row-gap:.2rem}
   .date{grid-column:2}
 }

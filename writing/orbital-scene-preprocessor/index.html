@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>307ms on 2 cores: fitting YOLOv8n into a satellite&#x27;s latency budget</title>
+<title>Squeezing YOLOv8n into orbit</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>307ms on 2 cores: fitting YOLOv8n into a satellite&#x27;s latency budget</h1>
+<h1>Squeezing YOLOv8n into orbit</h1>
 <p>I wanted to know how much of a satellite's imagery needs to come down at all, if the satellite can work out what's in a frame before it transmits anything. To test it, I set myself a constraint: run object detection on multispectral imagery with 2 CPU cores and 4GB of RAM, roughly the compute of a small satellite's onboard computer, and stay under 400ms per frame at p99. No GPU.</p>
 <p>Stock YOLOv8n at FP32 came in at around 560ms p99 on that profile, over budget before any variance under load.</p>
 <!-- TODO(evidence): name the exact board or VM profile, ONNX Runtime version, thread count, number of runs, and warm-up policy. -->

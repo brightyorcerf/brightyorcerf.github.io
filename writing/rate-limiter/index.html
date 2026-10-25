@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Racing a 250ms timeout: what happens to your rate limiter when Redis goes away</title>
+<title>When Redis goes away</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>Racing a 250ms timeout: what happens to your rate limiter when Redis goes away</h1>
+<h1>When Redis goes away</h1>
 <p>Most posts about distributed token buckets say that concurrent requests break them. I wanted to watch it happen before I believed it, and then fix it in a way I could defend. The setup: Express middleware on Node.js, bucket state in Redis, token bucket as the algorithm.</p>
 <!-- TODO(evidence): this opening promises a reproduction. Add the script (N concurrent requests from M instances against a bucket of size K) and its output: how many requests were admitted before and after the fix. -->
 
