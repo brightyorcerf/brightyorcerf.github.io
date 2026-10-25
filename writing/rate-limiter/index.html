@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Racing a 250ms timeout: what happens to your rate limiter when Redis goes away</title>
+<link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+<main><article>
+<h1>Racing a 250ms timeout: what happens to your rate limiter when Redis goes away</h1>
+<p>Nobody asked me to build a rate limiter. I kept reading about the race condition in token-bucket implementations under concurrent load and got annoyed that every post describing it just asserted the bug existed instead of showing it actually happening. I wanted to reproduce it myself before I believed it, and then fix it in a way I could defend. Token bucket is the textbook algorithm every API-throttling post reaches for, and it's deceptively easy to get right on a single process and deceptively easy to get wrong the moment you horizontally scale it.</p>
+<p>The setup: Node.js/Express middleware, state in Redis, Token Bucket as the algorithm. Simple on paper.</p>
+<h2>Where it actually breaks</h2>
+<p>The race isn't in the bucket math. It's in the gap between "read the current token count" and "write the decremented count back" — a gap that's nothing on one process, and a real window the instant you have multiple server instances hitting the same bucket concurrently. Two requests read the same count, both decide they're allowed, both decrement — and you've let through a request the bucket should have denied.</p>
+<p>The fix wasn't "add a lock" in the application layer — that just moves the race into whatever you used to implement the lock, and now you've added a slower, more fragile bottleneck to fix a correctness bug. The actual fix was pushing the whole read-decide-write sequence into Redis itself as an atomic Lua script, so the "gap" stops existing — Redis executes the script as a single operation, nothing else can interleave. The script reads the bucket's last-refill timestamp and token count, computes how many tokens should have regenerated since then using <code>redis.call('TIME')</code> as the clock rather than trusting the caller's clock, applies the refill, then makes the admit/deny decision and writes the new state back — all inside the one atomic execution. Keys carry a TTL slightly longer than the bucket's full refill interval, so idle buckets expire instead of accumulating forever in Redis.</p>
+<p>With that in place, the middleware held steady at +0.4ms overhead under load — the cost of one round trip to Redis plus script execution, nothing more.</p>
+<h2>The part that actually took longer: what happens when Redis isn't there</h2>
+<p>Atomic correctness is worthless if the limiter falls over the moment its dependency does. A rate limiter that hard-fails when Redis is unreachable just took your API down harder than whatever traffic spike you were trying to protect against in the first place.</p>
+<p>So every check races a 250ms timeout against Redis. If Redis answers first, you get the real, atomic decision. If the timeout wins, the middleware falls back to a local, per-instance in-memory approximation — a looser token count held in that server's own process memory, refilled on the same schedule but not synchronized across instances. It stops being correct in the distributed sense the moment it activates, and that's intentional: a worse approximation on purpose, in exchange for not depending on the thing that just stopped responding. That path is held to 1–2ms, because a degraded mode that's also slow defeats the point of having one.</p>
+<p>I also kept allowed and denied requests metered separately in both paths, on purpose — without that, a Redis outage looks identical in your metrics to a traffic spike, and you'll chase the wrong problem at 3am.</p>
+<h2>What I'd keep from this if I rebuilt it</h2>
+<ul>
+<li>Atomicity belongs as close to the shared state as possible. The Lua script approach meant I stopped thinking about locks entirely — the race just isn't representable anymore, instead of being prevented.</li>
+<li>A fault-tolerant system isn't one that never fails its dependency check — it's one where the failure path is deliberately designed, benchmarked, and distinguishable in your observability from the happy path.</li>
+<li>I underestimated how much the 250ms number itself mattered until I actually load-tested the tail latency — picking a timeout isn't a minor tuning detail, it's the line between "mostly correct, slightly slow" and "fast, approximate" for every request that lands near Redis's p99.</li>
+</ul>
+<hr>
+<p class="dek"><em>Code: [link if you open-source the middleware].</em></p>
+<a class="back" href="../../">&larr; back to tejaansh.dev</a>
+</article></main>
+</body>
+</html>
