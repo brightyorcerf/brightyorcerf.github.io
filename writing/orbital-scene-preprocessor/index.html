@@ -3,29 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>307ms on a 2-core box: squeezing YOLOv8n onto a satellite&#x27;s budget</title>
+<title>307ms on 2 cores: fitting YOLOv8n into a satellite&#x27;s latency budget</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>307ms on a 2-core box: squeezing YOLOv8n onto a satellite&#x27;s budget</h1>
-<p>Nobody assigned me this. I got curious about one specific question: how much of a satellite's imagery does it actually need to send down if it can decide what's in it before it transmits anything. The constraint I set for myself was simple to state and annoying to hit: run object detection on satellite imagery, on hardware you could actually fly — 2 cores, 4GB of RAM — fast enough to keep up with a pass window, inside a 400ms latency budget. Not a GPU. Not a dev laptop pretending to be the target.</p>
-<p>The naive version — a stock YOLOv8n in full precision — wasn't close. On the same 2-core/4GB profile, FP32 landed around 560ms p99, already over budget before accounting for any variance under load. The 1.83x speedup from quantization is what actually closed that gap, not some other optimization layered on top of it.</p>
-<h2>Why the bottleneck wasn't the model architecture</h2>
-<p>It's tempting to go reach for a smaller architecture when you miss a latency budget. I didn't, mostly because the accuracy I needed came from the 6-band input — this isn't RGB, it's multispectral, and dropping bands was a worse trade than almost anything else I tried. So the lever I had left was quantization: INT8 instead of FP32, run through ONNX Runtime.</p>
-<p>INT8 quantization is a tax you pay in accuracy to buy back latency and memory, and the exchange rate is not obvious until you actually measure it on your own model and your own data — generic quantization benchmarks don't transfer. On this model, the tax came out to 0.9 points of mAP@0.5. In exchange: the model got 3.43x smaller and 1.83x faster. I used static post-training quantization through ONNX Runtime, calibrated on a few hundred representative frames pulled from the actual target domain rather than a generic dataset — calibrating on the wrong distribution is the fastest way to quietly tank accuracy and not notice until you're already committed to the quantized weights. The detection head's final layers stayed FP16; quantizing those to INT8 cost disproportionately more accuracy on small objects than it bought in latency, so that was the one place I left precision on the table on purpose.</p>
-<p>That got me to 307.65ms p99, against the 400ms budget. Quantization did almost all of that work by itself — I didn't need operator fusion or batching tricks on top of it, which honestly surprised me going in.</p>
-<h2>The other half: deciding what's even worth sending down</h2>
-<p>A detection on an edge device is useless if the downlink can't carry it, and satellite downlink is the scarcest resource in the whole pipeline — scarcer than compute, by a lot. So the preprocessor doesn't just detect; it decides what's worth transmitting. Detections get serialized into protobuf briefs, and I used SGP4 propagation to know in advance which pass windows actually matter, so the system isn't burning compute or bandwidth outside the window it needs to care about.</p>
-<p>End to end, that cut payload size 1,484x compared to sending raw imagery down, at equal detection accuracy — because you're no longer sending the imagery, you're sending the conclusion.</p>
-<h2>What actually mattered, in order</h2>
-<p>1. The 6-band input was non-negotiable, which meant the entire quantization strategy had to work around preserving it rather than trading it away.</p>
-<p>2. Static INT8 quantization bought almost the entire latency win, for a fixed, known accuracy cost — not a vague one.</p>
-<p>3. SGP4 windowing turned "always-on inference" into "inference exactly when it's needed," which is a bigger bandwidth win than anything you can do to the model itself.</p>
-<p>What I'd try next, if I kept going: mixed precision per-band instead of a uniform INT8 pass across all six — some bands almost certainly carry more detection-relevant signal than others, and treating them identically in the quantization pass is probably leaving latency on the table I haven't claimed yet.</p>
-<hr>
-<p class="dek"><em>Code: [link once you open-source it]. Benchmarked on a 2-core/4GB ARM profile meant to approximate a satellite onboard computer — [fill in: exact board/SoC you actually used, e.g. Raspberry Pi Zero 2 W, or state if it was a constrained VM profile instead].</em></p>
-<a class="back" href="../../">&larr; back to tejaansh.dev</a>
+<h1>307ms on 2 cores: fitting YOLOv8n into a satellite&#x27;s latency budget</h1>
+<p>I wanted to know how much of a satellite's imagery needs to come down at all, if the satellite can work out what's in a frame before it transmits anything. To test it, I set myself a constraint: run object detection on multispectral imagery with 2 CPU cores and 4GB of RAM, roughly the compute of a small satellite's onboard computer, and stay under 400ms per frame at p99. No GPU.</p>
+<p>Stock YOLOv8n at FP32 came in at around 560ms p99 on that profile, over budget before any variance under load.</p>
+<!-- TODO(evidence): name the exact board or VM profile, ONNX Runtime version, thread count, number of runs, and warm-up policy. -->
+
+<h2>Why I didn't drop bands</h2>
+<p>YOLOv8n is already the smallest model in the YOLOv8 family, so a smaller architecture wasn't really on the table. The other obvious way to cut compute was to feed it fewer channels. The input is six-band multispectral, not RGB, and dropping bands cost more accuracy than anything else I tried. That left quantization: INT8 instead of FP32, through ONNX Runtime.</p>
+<!-- TODO(evidence): say how the first conv layer was adapted to 6 bands, which dataset you used, and the FP32 baseline mAP@0.5. -->
+
+<h2>Paying for INT8</h2>
+<p>INT8 gives up accuracy to win back latency and memory, and how much it gives up depends on your model and your data. Published quantization benchmarks told me little about mine. I used static post-training quantization in ONNX Runtime, calibrated on a few hundred frames from the target domain rather than a generic dataset. If you calibrate on the wrong distribution, accuracy can drop quietly, and you won't notice until you've committed to the quantized weights.</p>
+<p>The final layers of the detection head stayed out of the INT8 pass. Quantizing them cost a lot of accuracy on small objects and saved little latency, so that was the one place I kept precision on purpose.</p>
+<table>
+<tr><th></th><th>FP32</th><th>INT8</th></tr>
+<tr><td>p99 latency</td><td>~560 ms</td><td>307.65 ms</td></tr>
+<tr><td>speed</td><td>1×</td><td>1.83×</td></tr>
+<tr><td>model size</td><td>1×</td><td>3.43× smaller</td></tr>
+<tr><td>mAP@0.5</td><td>baseline</td><td>−0.9 points</td></tr>
+</table>
+<p>Quantization alone closed the gap. I expected to need operator fusion or batching on top of it, and I didn't.</p>
+
+<h2>Deciding what to send down</h2>
+<p>A detection made in orbit is useless if the downlink can't carry it, and downlink is scarcer than compute. So the preprocessor also decides what's worth transmitting. Detections are serialized into protobuf briefs. SGP4, the standard model for predicting a satellite's position from its published orbital elements, tells the system in advance which pass windows matter, so it doesn't spend compute or bandwidth outside them.</p>
+<p>Sending briefs instead of raw frames cut the payload by 1,484×. That ratio depends on how many detections a frame holds, because what comes down is a list of findings, not the image.</p>
+<!-- TODO(evidence): give the raw frame size, average brief size, and detections per frame behind 1,484x. Say whether the SGP4 windows are imaging targets or ground-station passes. -->
+
+<h2>Next</h2>
+<p>Mixed precision in the first convolution, the only layer where the six bands are still separate. Some bands probably carry more detection signal than others, and giving them all the same INT8 treatment may be costing accuracy or latency I haven't measured.</p>
+<p>If you've run quantized detectors on real flight hardware, I'd like to know how far off this profile is: <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
+<!-- TODO: add the repo link once it's public. Don't publish placeholder text. -->
+<a class="back" href="../../">home</a>
 </article></main>
 </body>
 </html>

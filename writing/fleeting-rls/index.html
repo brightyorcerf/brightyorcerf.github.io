@@ -3,33 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>The paywall bug that only showed up when Apple&#x27;s webhook didn&#x27;t</title>
+<title>The paywall bug that only showed up when RevenueCat&#x27;s webhook didn&#x27;t</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>The paywall bug that only showed up when Apple&#x27;s webhook didn&#x27;t</h1>
-<p>About three weeks after Fleeting went live on the App Store, I got an email from a user who'd paid for Fleeting and was locked out of the thing they paid for. Nobody else had reported it. I hadn't touched the paywall code in a while. That's usually the worst kind of bug to get a report about — the kind where your first instinct is "that shouldn't be possible."</p>
-<p>Fleeting is a time-capsule iOS app I built and shipped solo — SwiftUI client, Postgres on Supabase, RevenueCat for the App Store purchase layer. The thing I was proud of architecturally was that there's no backend server in the traditional sense. The client talks to Postgres directly. Every paywall rule — what you can and can't do as a free vs. paying user — is enforced by the database itself, through Row-Level Security policies and a handful of <code>SECURITY DEFINER</code> RPCs that run with elevated privilege to do the one thing a normal client-scoped role shouldn't be able to do: write an entitlement record.</p>
-<p>That's a nice architecture until you ask the question I hadn't really asked yet: what happens when the <em>thing that's supposed to tell Postgres someone paid</em> never arrives?</p>
-<h2>How entitlement was supposed to flow</h2>
-<p>App Store purchase → RevenueCat → a Supabase Edge Function that receives RevenueCat's webhook → that function calls the <code>SECURITY DEFINER</code> RPC to write the entitlement row. The client never touches this path at all; it just reads <code>entitlements</code> through RLS afterward.</p>
-<p>The RLS policies gating premium features all check a single <code>entitlements</code> table. No webhook, no row. No row, no access — even though Apple's own receipt says the person paid.</p>
-<p>RevenueCat retries webhook delivery, but retries aren't a guarantee, and I didn't have anything watching for the case where delivery just silently failed and nobody retried hard enough. In this case, the Edge Function cold-started slower than RevenueCat's webhook timeout window — the function was still spinning up when RevenueCat gave up waiting for a response. It logged the delivery as failed, retried a couple of times on its own schedule, and by the time it retried, something about the retry's payload or timing meant it never landed either. No alert fired on my end, because I didn't have anything watching for "webhook endpoint returned success 99% of the time" — I only would have noticed the other 1% from a support email.</p>
-<h2>The actual fix</h2>
-<p>I didn't want to "fix" this by making the client trust itself more — that's the opposite direction you want to go with paywall logic, since now you've built a client that can just assert it's entitled. The fix had to stay server-side and stay provable.</p>
-<p>What I ended up with: a reconciliation path that doesn't depend on the webhook ever arriving at all. A scheduled Edge Function, running every few hours, pulls each active user's current entitlement status directly from RevenueCat's REST API and diffs it against the <code>entitlements</code> table. Mismatches get repaired automatically — a paying user with no row gets one written, through the same <code>SECURITY DEFINER</code> RPC the webhook would have called. The webhook is a fast path now, not the only path; worst case, a user waits a few hours instead of being locked out indefinitely with nobody watching.</p>
-<p>The RLS policies didn't change. What changed was removing the assumption that exactly one event, exactly once, was how the truth got into the table.</p>
-<h2>What I'd actually tell someone building paywall logic on RLS</h2>
+<h1>The paywall bug that only showed up when RevenueCat&#x27;s webhook didn&#x27;t</h1>
+<p>About three weeks after Fleeting went live on the App Store, a user emailed me. They had paid, and they were locked out of the thing they paid for. Nobody else had reported it, and I hadn't touched the paywall code in weeks. My first reaction was that this couldn't happen.</p>
+<p>Fleeting is a time-capsule iOS app I built and shipped alone: a SwiftUI client, Postgres on Supabase, and RevenueCat for App Store purchases. There is no backend server. The client talks to Postgres directly, and every paywall rule lives in the database as Row-Level Security policies. Clients can't write entitlements. The one privileged write goes through a <code>SECURITY DEFINER</code> function, which runs with its owner's privileges instead of the caller's.</p>
+<p>I liked that design. I just hadn't asked what happens when the message telling Postgres that someone paid never arrives.</p>
+
+<h2>How a purchase becomes a row</h2>
+<p>App Store purchase → RevenueCat → webhook to a Supabase Edge Function → the function calls the <code>SECURITY DEFINER</code> RPC → a row in <code>entitlements</code>. The client never touches this path. It only reads <code>entitlements</code> through RLS afterwards.</p>
+<!-- TODO(evidence): paste the real RLS policy and the RPC signature here as <pre><code> blocks. -->
+<p>Every premium-feature policy checks that one table. No webhook, no row. No row, no access, even though Apple's receipt says the user paid.</p>
+
+<h2>Where the webhook went</h2>
+<p>RevenueCat's delivery log showed the attempt as failed. The Edge Function had been cold and was still starting when RevenueCat stopped waiting for a response. RevenueCat retried a couple of times on its own schedule, and those retries didn't land either. I never fully worked out why. Nothing on my side alerted, because nothing was watching for failed deliveries. A support email was the only alarm I had.</p>
+<!-- TODO(evidence): add the delivery log lines with timestamps, the cold-start duration, and RevenueCat's timeout. If you later found why the retries failed, replace "I never fully worked out why" with that. -->
+
+<h2>Reconciling against the source of truth</h2>
+<p>I didn't want to fix this by letting the client vouch for itself. A client that can assert it's entitled is a paywall with a hole in it, so the fix had to stay on the server.</p>
+<p>I added a path that doesn't depend on the webhook at all. A scheduled Edge Function runs every few hours, asks RevenueCat's REST API for each user's current entitlement, and compares the answer with the <code>entitlements</code> table. A paying user with no row gets one, written through the same RPC the webhook would have called. The webhook is now the fast path rather than the only path. In the worst case, a user waits a few hours instead of staying locked out until they email me.</p>
+<!-- TODO(evidence): show the reconciliation query, including how it chooses which users to check. If it reads from entitlements, it skips exactly the users who have no row. -->
+<p>The RLS policies didn't change. What changed was the assumption that one event, delivered exactly once, was the only way the truth reached the table.</p>
+
+<h2>What I'd tell someone putting a paywall in RLS</h2>
 <ul>
-<li>If a <code>SECURITY DEFINER</code> function is the only way a privileged write happens, audit every caller of it like it's an attack surface, not a convenience — because from the client's perspective, it kind of is one.</li>
-<li>Webhooks are an input, not a source of truth. If your source of truth (Apple, Stripe, whoever) is queryable, your system should be able to reconcile against it without a human noticing first.</li>
-<li>"No row exists" is doing a lot of silent work in a deny-by-default RLS policy. It's correct and it's exactly the kind of correct that will hide a delivery failure from you until a user emails you.</li>
+<li>Webhooks are an input, not the source of truth. If the real source (Apple, Stripe, RevenueCat) can be queried, reconcile against it on a schedule.</li>
+<li>In a deny-by-default policy, a missing row looks exactly like a user who never paid. That's correct, and it's also why a delivery failure stays invisible until someone complains.</li>
+<li>Alert on failed webhook deliveries, not only on errors in your own code.</li>
 </ul>
-<p>I didn't find this because of a threat model or a pentest — I found it because a real person paid for something and couldn't get to it, and I had to go figure out why Postgres thought they hadn't. It changed how I think about anything that writes to a privileged table from outside the request path a user is actually watching: if the only thing standing between "paid" and "locked out" is one webhook arriving exactly once, that's not a system, that's a hope.</p>
-<hr>
-<p class="dek"><em>Fleeting is live on the App Store. [link] Code for the reconciliation job: [link if you open-source it].</em></p>
-<a class="back" href="../../">&larr; back to tejaansh.dev</a>
+<p>I didn't find this with a threat model. I found it because someone paid for something and couldn't use it. If you've built entitlements on RLS and handled delivery failures differently, I'd like to hear how: <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
+<!-- TODO: add the App Store link and the repo link once they exist. Don't publish placeholder text. -->
+<a class="back" href="../../">home</a>
 </article></main>
 </body>
 </html>
