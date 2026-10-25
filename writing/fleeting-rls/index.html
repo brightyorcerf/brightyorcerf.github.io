@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Paid, but Postgres said no</title>
+<title>Postgres said no</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>Paid, but Postgres said no</h1>
+<h1>Postgres said no</h1>
 <p>About three weeks after Fleeting went live on the App Store, a user emailed me. They had paid, and they were locked out of the thing they paid for. Nobody else had reported it, and I hadn't touched the paywall code in weeks. My first reaction was that this couldn't happen.</p>
 <p>Fleeting is a time-capsule iOS app I built and shipped alone: a SwiftUI client, Postgres on Supabase, and RevenueCat for App Store purchases. There is no backend server. The client talks to Postgres directly, and every paywall rule lives in the database as Row-Level Security policies. Clients can't write entitlements. The one privileged write goes through a <code>SECURITY DEFINER</code> function, which runs with its owner's privileges instead of the caller's.</p>
 <p>I liked that design. I just hadn't asked what happens when the message telling Postgres that someone paid never arrives.</p>
