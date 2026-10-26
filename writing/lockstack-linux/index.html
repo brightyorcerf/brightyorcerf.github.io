@@ -3,14 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Why three threads? (draft)</title>
+<title>Why three threads? (in progress)</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>Why three threads? (draft)</h1>
-<p><em>Working notes for a Rabbit Holes 2026 entry, Sapling track. Submissions run 1 November 2026 to 23 January 2027. This page is a plan, not a write-up.</em></p>
+<h1>Why three threads? (in progress)</h1>
+<p><em>An unfinished rabbit hole. This is the plan and the open question, written down before I have answers, for a Rabbit Holes 2026 entry (Sapling track). I'll update it as results come in. If you already know the answer, I'd like to hear it.</em></p>
 
 <h2>The question</h2>
 <p>A lock-based stack (<code>LockStack</code>: optimistic read of <code>top</code>, non-fair <code>ReentrantLock</code>, validate, publish) runs at 29 MOPS on one thread, 8.5 on two, and about 20 on three or more. On macOS I've shown why the dip exists: with two threads nearly every unlock has to wake a parked waiter, and from three up, running threads barge past parked ones. A fair lock collapses to 0.2 MOPS, a spin lock has no dip, and JFR counts 6.6 times more parks per operation at two threads than at four. The details are in <a href="../benchmarks-lied/">Five ways my benchmarks lied to me</a> and in <a href="https://github.com/brightyorcerf/parallel-universe/tree/main/lockstep/experiments/lockstack-dip">lockstep/experiments/lockstack-dip</a>.</p>
