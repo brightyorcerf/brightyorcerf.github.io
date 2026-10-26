@@ -32,6 +32,17 @@
 </table>
 <p>The first row is the control: one request at a time, and the naive version is correct.</p>
 <p>The second row surprised me. The usual explanation is that this race needs several servers sharing one bucket. It doesn't. A single Node process with just two requests in flight admitted <em>exactly</em> 200, in all ten trials. Both requests go out on the same Redis connection, so the commands arrive in the order read, read, write, write. Both reads see the same count, both writes store the same decremented value, and two requests spend one token. The limit gets multiplied by the concurrency, as reliably as clockwork. More processes just make it noisier.</p>
+<p>You don't have to take my word for the order. Here is <a href="https://redis.io/docs/latest/commands/monitor/"><code>MONITOR</code></a> while one process runs two naive checks at a time against a bucket holding 3 tokens:</p>
+<pre><code>[0 127.0.0.1:51358] "HMGET" "wire" "tokens"
+[0 127.0.0.1:51358] "HMGET" "wire" "tokens"
+[0 127.0.0.1:51358] "HSET" "wire" "tokens" "2"
+[0 127.0.0.1:51358] "HSET" "wire" "tokens" "2"
+[0 127.0.0.1:51358] "HMGET" "wire" "tokens"
+[0 127.0.0.1:51358] "HMGET" "wire" "tokens"
+[0 127.0.0.1:51358] "HSET" "wire" "tokens" "1"
+[0 127.0.0.1:51358] "HSET" "wire" "tokens" "1"
+...</code></pre>
+<p>One connection (port 51358), two reads, then two writes of the same value. Six requests got through on three tokens.</p>
 <p>The last row is worse than over-admission. At 8 requests in flight per process, the bucket never emptied at all. With 32 reads landing on the same value, almost every write overwrites another, so the stored count barely moves while 1,000 requests walk through.</p>
 
 <h2>The fix</h2>
@@ -72,6 +83,14 @@ tokens = math.min(capacity, tokens + (elapsed / 1000) * rate)</code></pre>
 <h2>A trap I fell into while measuring this</h2>
 <p>The first time I ran the outage test, one check during the hung phase took 30 minutes. The second time, 25. It wasn't Redis. The Mac's power log showed it had gone to sleep for 1,808 and 1,523 seconds, which matched the two stalls. Timers can't fire while the machine is asleep, so neither could the 250 ms timeout. This is the same trap I wrote about in <a href="../benchmarks-lied/">five ways my benchmarks lied to me</a>, and I still walked into it. The numbers above come from a run under <code>caffeinate -dims</code>, where the slowest of the 300 hung checks took 253 ms.</p>
 <p>Both experiments are in the <a href="https://github.com/brightyorcerf/rate-limiter">repo</a> under <code>experiments/</code>. If you've tuned a circuit breaker in front of Redis, I'd like to know what thresholds you landed on: <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
+<h2>References</h2>
+<ul class="refs">
+<li>Redis, <a href="https://redis.io/docs/latest/develop/interact/programmability/eval-intro/">Scripting with Lua</a>: scripts run atomically, and nothing else executes while one is running.</li>
+<li>Redis, <a href="https://redis.io/docs/latest/commands/time/"><code>TIME</code></a> and <a href="https://redis.io/docs/latest/commands/monitor/"><code>MONITOR</code></a>.</li>
+<li><a href="https://github.com/redis/node-redis">node-redis</a>, whose <code>disableOfflineQueue</code> option is what makes a dead Redis fail fast.</li>
+<li>Martin Fowler, <a href="https://martinfowler.com/bliki/CircuitBreaker.html">CircuitBreaker</a>: the piece this limiter is still missing.</li>
+<li>The middleware, the race and outage experiments, and the benchmark: <a href="https://github.com/brightyorcerf/rate-limiter">rate-limiter</a>.</li>
+</ul>
 <a class="back" href="../../">home</a>
 </article></main>
 </body>

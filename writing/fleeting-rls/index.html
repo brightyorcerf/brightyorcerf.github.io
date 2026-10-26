@@ -55,6 +55,13 @@ if (!active) {
 <h2>What stuck with me</h2>
 <p>Both bugs came from treating a confident answer as an authoritative one. RevenueCat didn't fail. It answered a slightly different question, about a customer my request had just created. Postgres didn't fail either. It compared two strings exactly as asked. A repair path only runs when something has already gone wrong, so the only safe thing it can do is move toward the outcome that's cheap to be wrong about. Here, that's granting.</p>
 <p>The question I'm left with: what other APIs quietly create the thing you asked about when you read it? If one has bitten you, <a href="mailto:thetejaansh@gmail.com">tell me</a>.</p>
+<h2>References</h2>
+<ul class="refs">
+<li>RevenueCat, <a href="https://www.revenuecat.com/docs/api-v1">REST API v1</a>: <code>GET /subscribers/{app_user_id}</code>, the lookup the repair function uses.</li>
+<li>RevenueCat, <a href="https://www.revenuecat.com/docs/integrations/webhooks/event-types-and-fields">webhook event types</a>, including what <code>CANCELLATION</code> actually means.</li>
+<li>Supabase, <a href="https://supabase.com/docs/guides/database/postgres/row-level-security">Row Level Security</a>.</li>
+<li>PostgreSQL, <a href="https://www.postgresql.org/docs/current/datatype-uuid.html">UUID type</a> (accepts either case and compares as a value) and <a href="https://www.postgresql.org/docs/current/sql-createfunction.html"><code>CREATE FUNCTION</code></a> (<code>SECURITY DEFINER</code> and <code>search_path</code>).</li>
+</ul>
 <a class="back" href="../../">home</a>
 </article></main>
 </body>

@@ -29,11 +29,103 @@ P0007_00000_01497   1.0000  0.0976  0.0550  0.0461  0.0003  0.0000   cliff 147x
 P0961_01920_00471   1.0000  0.1728  0.0837  0.0543  0.0006  0.0000   cliff  93x
 P1854_01440_01920   1.0000  0.1318  0.0549  0.0202  0.0003  0.0000   cliff  61x
 P2794_00000_03360   1.0000  0.1764  0.0538  0.0297  0.0003  0.0000   cliff  88x</code></pre>
-<p>Six channels, four real components, then a drop of 60 to 150 times into numerical noise. Three of the four are the original RGB. The fourth is the blur from resampling B11 and B12, which is still a function of RGB.</p>
+<p>The core of it is four lines (<a href="https://github.com/brightyorcerf/orbital-preprocessor/blob/main/tools/band_svd.py"><code>tools/band_svd.py</code></a>):</p>
+<pre><code>x = read_tile(path).reshape(-1, 6).astype(np.float64)   # pixels x bands
+x -= x.mean(axis=0)
+s = np.linalg.svd(x, compute_uv=False)
+s / s[0]</code></pre>
+<figure class="chart">
+<svg viewBox="0 0 640 300" role="img" aria-labelledby="t1127"><title id="t1127">Normalised singular values of four derived six-band tiles, log scale</title>
+<line x1="60" x2="624" y1="260.0" y2="260.0" class="g"/><text x="52" y="264.0" text-anchor="end" class="ax">1e-8</text>
+<line x1="60" x2="624" y1="201.0" y2="201.0" class="g"/><text x="52" y="205.0" text-anchor="end" class="ax">1e-6</text>
+<line x1="60" x2="624" y1="142.0" y2="142.0" class="g"/><text x="52" y="146.0" text-anchor="end" class="ax">1e-4</text>
+<line x1="60" x2="624" y1="83.0" y2="83.0" class="g"/><text x="52" y="87.0" text-anchor="end" class="ax">1e-2</text>
+<line x1="60" x2="624" y1="24.0" y2="24.0" class="g"/><text x="52" y="28.0" text-anchor="end" class="ax">1e0</text>
+<text x="60.0" y="278" text-anchor="middle" class="ax">σ1</text>
+<text x="172.8" y="278" text-anchor="middle" class="ax">σ2</text>
+<text x="285.6" y="278" text-anchor="middle" class="ax">σ3</text>
+<text x="398.4" y="278" text-anchor="middle" class="ax">σ4</text>
+<text x="511.2" y="278" text-anchor="middle" class="ax">σ5</text>
+<text x="624.0" y="278" text-anchor="middle" class="ax">σ6</text>
+<polyline fill="none" stroke="#8f7be8" stroke-width="2" stroke-opacity=".75" points="60.0,24.0 172.8,53.8 285.6,61.2 398.4,63.4 511.2,127.4 624.0,247.4"/>
+<circle cx="60.0" cy="24.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0007_00000_01497 σ1 = 1.00e+00</title></circle>
+<circle cx="172.8" cy="53.8" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0007_00000_01497 σ2 = 9.76e-02</title></circle>
+<circle cx="285.6" cy="61.2" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0007_00000_01497 σ3 = 5.50e-02</title></circle>
+<circle cx="398.4" cy="63.4" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0007_00000_01497 σ4 = 4.61e-02</title></circle>
+<circle cx="511.2" cy="127.4" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0007_00000_01497 σ5 = 3.12e-04</title></circle>
+<circle cx="624.0" cy="247.4" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0007_00000_01497 σ6 = 2.68e-08</title></circle>
+<polyline fill="none" stroke="#8f7be8" stroke-width="2" stroke-opacity=".75" points="60.0,24.0 172.8,46.5 285.6,55.8 398.4,61.3 511.2,119.4 624.0,238.3"/>
+<circle cx="60.0" cy="24.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0961_01920_00471 σ1 = 1.00e+00</title></circle>
+<circle cx="172.8" cy="46.5" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0961_01920_00471 σ2 = 1.73e-01</title></circle>
+<circle cx="285.6" cy="55.8" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0961_01920_00471 σ3 = 8.37e-02</title></circle>
+<circle cx="398.4" cy="61.3" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0961_01920_00471 σ4 = 5.43e-02</title></circle>
+<circle cx="511.2" cy="119.4" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0961_01920_00471 σ5 = 5.85e-04</title></circle>
+<circle cx="624.0" cy="238.3" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P0961_01920_00471 σ6 = 5.45e-08</title></circle>
+<polyline fill="none" stroke="#8f7be8" stroke-width="2" stroke-opacity=".75" points="60.0,24.0 172.8,50.0 285.6,61.2 398.4,74.0 511.2,126.6 624.0,239.4"/>
+<circle cx="60.0" cy="24.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P1854_01440_01920 σ1 = 1.00e+00</title></circle>
+<circle cx="172.8" cy="50.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P1854_01440_01920 σ2 = 1.32e-01</title></circle>
+<circle cx="285.6" cy="61.2" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P1854_01440_01920 σ3 = 5.49e-02</title></circle>
+<circle cx="398.4" cy="74.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P1854_01440_01920 σ4 = 2.02e-02</title></circle>
+<circle cx="511.2" cy="126.6" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P1854_01440_01920 σ5 = 3.32e-04</title></circle>
+<circle cx="624.0" cy="239.4" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P1854_01440_01920 σ6 = 5.00e-08</title></circle>
+<polyline fill="none" stroke="#8f7be8" stroke-width="2" stroke-opacity=".75" points="60.0,24.0 172.8,46.2 285.6,61.4 398.4,69.0 511.2,126.3 624.0,251.5"/>
+<circle cx="60.0" cy="24.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P2794_00000_03360 σ1 = 1.00e+00</title></circle>
+<circle cx="172.8" cy="46.2" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P2794_00000_03360 σ2 = 1.76e-01</title></circle>
+<circle cx="285.6" cy="61.4" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P2794_00000_03360 σ3 = 5.38e-02</title></circle>
+<circle cx="398.4" cy="69.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P2794_00000_03360 σ4 = 2.97e-02</title></circle>
+<circle cx="511.2" cy="126.3" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P2794_00000_03360 σ5 = 3.40e-04</title></circle>
+<circle cx="624.0" cy="251.5" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>P2794_00000_03360 σ6 = 1.93e-08</title></circle>
+<text x="172.8" y="108" text-anchor="middle" class="dl">RGB</text>
+<text x="454.8" y="98.4" text-anchor="middle" class="dl">resampling blur</text>
+<text x="612.0" y="219.3" text-anchor="end" class="dl">float noise</text>
+<text x="60" y="12" class="ax">σ / σ1</text></svg>
+<figcaption>The same four tiles, on a log scale. Hover a point for its value.</figcaption>
+</figure>
+<p>Three components are the original RGB. Then two smaller ones, then floating-point noise. I wanted to know where the middle two came from, so I rebuilt one tile's bands with each step switched off:</p>
+<table>
+<tr><th>clip</th><th>resample B11/B12</th><th>σ4</th><th>σ5</th></tr>
+<tr><td>no</td><td>no</td><td>6e−13</td><td>8e−16</td></tr>
+<tr><td>yes</td><td>no</td><td>4e−4</td><td>7e−5</td></tr>
+<tr><td>no</td><td>yes</td><td>0.046</td><td>3e−4</td></tr>
+<tr><td>yes</td><td>yes</td><td>0.046</td><td>3e−4</td></tr>
+</table>
+<p>Without clipping or resampling, six channels are exactly rank three, as the arithmetic says they must be. Clipping barely registers, because fewer than 0.7% of pixels go negative. Both extra directions come from the resampling: a blurred copy of R, G and B isn't a linear mix of the sharp ones. σ5 is small because B11 and B12 are nearly the same mix. So my "short-wave infrared" is, precisely, a blurry red-ish image, twice.</p>
 
 <h2>And yet the network cares</h2>
 <p>So I expected dropping the fake bands to cost nothing. An earlier version of my README said exactly that, and said it "reproduces on DOTA". I wrote it before I'd measured anything on DOTA, and it was wrong.</p>
 <p>Zeroing bands at inference, over 96 held-out tiles (differences of about 0.01 are noise at this sample size):</p>
+<figure class="chart">
+<svg viewBox="0 0 640 300" role="img" aria-labelledby="t7585"><title id="t7585">Change in mAP@0.5 when each band is zeroed at inference, 96 held-out tiles</title>
+<line x1="197.8" x2="197.8" y1="16" y2="270" class="g"/><text x="197.8" y="288" text-anchor="middle" class="ax">-0.06</text>
+<line x1="293.3" x2="293.3" y1="16" y2="270" class="g"/><text x="293.3" y="288" text-anchor="middle" class="ax">-0.04</text>
+<line x1="388.9" x2="388.9" y1="16" y2="270" class="g"/><text x="388.9" y="288" text-anchor="middle" class="ax">-0.02</text>
+<line x1="484.4" x2="484.4" y1="16" y2="270" class="g"/><text x="484.4" y="288" text-anchor="middle" class="ax">+0.00</text>
+<line x1="580.0" x2="580.0" y1="16" y2="270" class="g"/><text x="580.0" y="288" text-anchor="middle" class="ax">+0.02</text>
+<rect x="484.4" y="23.3" width="52.1" height="21.8" rx="4" fill="#8b949e"><title>B3 (green): mAP 0.847 (+0.011)</title></rect>
+<text x="142" y="38.1" text-anchor="end" class="ax">B3 (green)</text>
+<text x="542.5" y="38.1" text-anchor="start" class="dl">+0.011</text>
+<rect x="484.4" y="59.5" width="37.3" height="21.8" rx="4" fill="#8b949e"><title>B8 (fake NIR): mAP 0.844 (+0.008)</title></rect>
+<text x="142" y="74.4" text-anchor="end" class="ax">B8 (fake NIR)</text>
+<text x="527.7" y="74.4" text-anchor="start" class="dl">+0.008</text>
+<rect x="484.4" y="95.8" width="32.0" height="21.8" rx="4" fill="#8b949e"><title>B12 (fake SWIR): mAP 0.843 (+0.007)</title></rect>
+<text x="142" y="110.7" text-anchor="end" class="ax">B12 (fake SWIR)</text>
+<text x="522.5" y="110.7" text-anchor="start" class="dl">+0.007</text>
+<rect x="471.1" y="132.1" width="13.4" height="21.8" rx="4" fill="#8b949e"><title>B11 (fake SWIR): mAP 0.833 (-0.003)</title></rect>
+<text x="142" y="147.0" text-anchor="end" class="ax">B11 (fake SWIR)</text>
+<text x="490.4444444444445" y="147.0" text-anchor="start" class="dl">-0.003</text>
+<rect x="267.1" y="168.4" width="217.4" height="21.8" rx="4" fill="#b0860f"><title>B11 + B12: mAP 0.791 (-0.046)</title></rect>
+<text x="142" y="183.3" text-anchor="end" class="ax">B11 + B12</text>
+<text x="490.4444444444445" y="183.3" text-anchor="start" class="dl">-0.046</text>
+<rect x="242.2" y="204.7" width="242.2" height="21.8" rx="4" fill="#b0860f"><title>B4 (blue channel): mAP 0.785 (-0.051)</title></rect>
+<text x="142" y="219.6" text-anchor="end" class="ax">B4 (blue channel)</text>
+<text x="490.4444444444445" y="219.6" text-anchor="start" class="dl">-0.051</text>
+<rect x="169.1" y="241.0" width="315.3" height="21.8" rx="4" fill="#b0860f"><title>B2 (red channel): mAP 0.770 (-0.066)</title></rect>
+<text x="142" y="255.9" text-anchor="end" class="ax">B2 (red channel)</text>
+<text x="490.4444444444445" y="255.9" text-anchor="start" class="dl">-0.066</text>
+</svg>
+<figcaption>Change in mAP@0.5 from a baseline of 0.836. Grey bars are within noise.</figcaption>
+</figure>
+<details><summary>data</summary>
 <table>
 <tr><th>dropped</th><th>mAP@0.5</th><th>change</th></tr>
 <tr><td>nothing</td><td>0.836</td><td></td></tr>
@@ -42,11 +134,13 @@ P2794_00000_03360   1.0000  0.1764  0.0538  0.0297  0.0003  0.0000   cliff  88x<
 <tr><td>B12 (fake SWIR)</td><td>0.843</td><td>+0.007</td></tr>
 <tr><td>B11 (fake SWIR)</td><td>0.833</td><td>−0.003</td></tr>
 <tr><td>B11 and B12</td><td>0.791</td><td>−0.046</td></tr>
-<tr><td>B4 (red)</td><td>0.786</td><td>−0.051</td></tr>
-<tr><td>B2 (blue)</td><td>0.770</td><td>−0.066</td></tr>
+<tr><td>B4 (blue channel)</td><td>0.786</td><td>−0.051</td></tr>
+<tr><td>B2 (red channel)</td><td>0.770</td><td>−0.066</td></tr>
 <tr><td>all six (control)</td><td>0.000</td><td></td></tr>
 </table>
-<p>Either fake band alone barely matters, but both together cost 5.4% relative. The two bands the network leans on hardest are plain blue and red, not the infrared the whole design was built around.</p>
+</details>
+<p>A confession while we're here. Sentinel-2 calls blue B2 and red B4, but my pipeline maps the RGB array straight onto B2, B3, B4, so my "B2" holds the red channel and my "B4" holds blue. The code comment says it was "for simplicity". It doesn't change any result, but it does mean every earlier write-up of mine that said "B2 (blue)" was wrong about the colour.</p>
+<p>Either fake band alone barely matters, but both together cost 5.4% relative. The two bands the network leans on hardest are the plain red and blue channels, not the infrared the whole design was built around.</p>
 <p>These two results don't contradict each other. The extra channels carry no new information, but the network still learned to use them. I initialised the new input weights from the mean of the pretrained RGB weights (so from step zero they were live edge detectors), and 32 epochs of training pulled B11 and B12 into carrying part of the load, however redundantly. Zeroing a channel the network learned to rely on is a distribution shift, not a loss of information. <em>Information-redundant</em> and <em>safe to remove</em> turn out to be different claims.</p>
 <p>The honest summary: the six-channel stem is correct engineering for a sensor this project doesn't have.</p>
 
@@ -91,6 +185,14 @@ P2794_00000_03360   1.0000  0.1764  0.0538  0.0297  0.0003  0.0000   cliff  88x<
 <h2>What doesn't transfer</h2>
 <p>DOTA is aerial imagery at 0.1 to 1 m per pixel, and the orbital part of this project models 10 m. The 0.880 mAP is a real measurement on real photographs of the right four classes, and it says nothing about orbital imagery. Storage tanks are the weak class: recall 0.653 at precision 0.936, so the model isn't confusing tanks with anything, it's missing them, mostly in cluttered refineries.</p>
 <p>If you know where to find SWIR imagery sharp enough to see ships, or you've tested a detector on real multispectral data, I'd love to know whether the infrared ever starts pulling its weight: <a href="mailto:thetejaansh@gmail.com">email me</a>. The code, the raw latency output and every measurement script are in <a href="https://github.com/brightyorcerf/orbital-preprocessor">orbital-preprocessor</a>.</p>
+<h2>References</h2>
+<ul class="refs">
+<li>Gui-Song Xia et al., <a href="https://arxiv.org/abs/1711.10398">DOTA: A Large-scale Dataset for Object Detection in Aerial Images</a>, CVPR 2018.</li>
+<li>ESA, <a href="https://sentiwiki.copernicus.eu/web/s2-mission">Sentinel-2 mission</a>: band definitions and their 10 m / 20 m resolutions.</li>
+<li>ONNX Runtime, <a href="https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html">Quantize ONNX models</a>: static vs dynamic, QDQ format, calibration.</li>
+<li>Ultralytics, <a href="https://docs.ultralytics.com/models/yolov8/">YOLOv8</a>.</li>
+<li>Every measurement script and raw artifact: <a href="https://github.com/brightyorcerf/orbital-preprocessor">orbital-preprocessor</a>.</li>
+</ul>
 <a class="back" href="../../">home</a>
 </article></main>
 </body>
