@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Why three threads? (draft)</title>
+<link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+<main><article>
+<h1>Why three threads? (draft)</h1>
+<p><em>Working notes for a Rabbit Holes 2026 entry, Sapling track. Submissions run 1 November 2026 to 23 January 2027. This page is a plan, not a write-up.</em></p>
+
+<h2>The question</h2>
+<p>A lock-based stack (<code>LockStack</code>: optimistic read of <code>top</code>, non-fair <code>ReentrantLock</code>, validate, publish) runs at 29 MOPS on one thread, 8.5 on two, and about 20 on three or more. On macOS I've shown why the dip exists: with two threads nearly every unlock has to wake a parked waiter, and from three up, running threads barge past parked ones. A fair lock collapses to 0.2 MOPS, a spin lock has no dip, and JFR counts 6.6 times more parks per operation at two threads than at four. The details are in <a href="../benchmarks-lied/">Five ways my benchmarks lied to me</a> and in <a href="https://github.com/brightyorcerf/parallel-universe/tree/main/lockstep/experiments/lockstack-dip">lockstep/experiments/lockstack-dip</a>.</p>
+<p>What I can't explain is why the switch is sharp, all of it between two and three threads. That's this investigation.</p>
+
+<h2>Hypotheses</h2>
+<ol>
+<li><strong>A barger needs a second running thread.</strong> With two threads, when the holder unlocks, the only other thread is parked, so the unlock has to wake it, and nobody else can take the lock in between except the releaser itself. With three, there's usually another running thread arriving at the lock, so it changes hands between running threads while the queue head stays parked.</li>
+<li><strong>Wake-up latency dwarfs the critical section.</strong> A push or pop holds the lock for tens of nanoseconds; waking a parked thread takes microseconds. If that ratio is what matters, making the critical section longer should move the switch point.</li>
+<li><strong>AQS's spin-before-park.</strong> In JDK 17 a woken waiter that loses spins a little longer each time before parking again (<code>postSpins</code> doubles). The queue length could change how often that spin catches the lock.</li>
+<li><strong>It's macOS.</strong> The scheduler or thread QoS on macOS might be part of it. The first step is checking whether Linux shows the dip at all.</li>
+</ol>
+
+<h2>Plan</h2>
+<p>On a native Linux machine with at least four cores. Not a VM: <code>perf</code> and core pinning need real hardware. Run from <code>lockstep/experiments/lockstack-dip</code>, with <code>caffeinate</code> removed from <code>run.sh</code>.</p>
+<ol>
+<li><strong>Reproduce.</strong> Turbo off, same sweep as macOS, then 1 to 8 threads in steps of one.
+<pre><code>javac -d build $(ls ../../src/*.java | grep -v '/Bench.java$') *.java
+echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
+java -Xms2g -Xmx2g -cp build Bench LockStack 1000 0C-50I-50D 1,2,3,4,5,6,7,8 5 2000</code></pre>
+If there's no dip on Linux, hypothesis 4 wins and the post becomes about macOS scheduling.</li>
+<li><strong>Count barging directly.</strong> A fifth variant that does <code>if (!lock.tryLock()) { contended++; lock.lock(); }</code> and records how often the lock is free on arrival, at each thread count. Hypothesis 1 predicts a jump between two and three.</li>
+<li><strong>Pin threads.</strong> Two threads on one core vs two cores; three threads on two cores.
+<pre><code>taskset -c 0   java ... Bench LockStack 1000 0C-50I-50D 2 5 2000
+taskset -c 0,1 java ... Bench LockStack 1000 0C-50I-50D 2 5 2000
+taskset -c 0,1 java ... Bench LockStack 1000 0C-50I-50D 3 5 2000</code></pre></li>
+<li><strong>Stretch the critical section.</strong> Add a fixed amount of busy work inside the lock (for example, a loop of <code>Blackhole</code>-style work) at a few lengths. If the switch point moves to more threads as the critical section grows, that supports hypothesis 2.</li>
+<li><strong>Measure wake-up latency and cache traffic.</strong>
+<pre><code>sudo perf sched record -- java ... Bench LockStack 1000 0C-50I-50D 2 1 2000
+sudo perf sched latency | head -20
+sudo perf c2c record -- java ... Bench LockStack 1000 0C-50I-50D 2 1 2000
+sudo perf c2c report --stdio | head -60</code></pre>
+Compare two and three threads. The question is whether the woken thread is usually still waiting to run when the releaser comes back for the lock.</li>
+<li><strong>Profile where threads wait.</strong> async-profiler in lock mode (<code>-e lock</code>), producing a flame graph for two and three threads.</li>
+<li><strong>JFR on Linux.</strong> Repeat the park counts with <code>park.jfc</code> and <code>CountParks</code>, so macOS and Linux are directly comparable.</li>
+</ol>
+
+<h2>Controls</h2>
+<ul>
+<li>Turbo off, AC power, nothing else running, five runs per point, report the spread.</li>
+<li>Randomise the order of thread counts so slow drift can't make a fake trend.</li>
+<li>Note the CPU model, core count, kernel, JDK and governor in every results file.</li>
+<li>Keep every raw file. Check that elapsed times are close to 2 s before trusting a run.</li>
+</ul>
+
+<h2>The write-up, when it's done</h2>
+<ol>
+<li>The dip, and what I already showed on macOS (short).</li>
+<li>Does Linux agree?</li>
+<li>Each hypothesis, the experiment that tests it, and the result, including the ones that failed.</li>
+<li>Charts: throughput against threads, barge rate against threads, switch point against critical-section length.</li>
+<li>What I still don't know.</li>
+<li>Code and raw data in the repo, and references (the JDK sources, AQS, Shipilëv).</li>
+</ol>
+
+<a class="back" href="../../">home</a>
+</article></main>
+</body>
+</html>
