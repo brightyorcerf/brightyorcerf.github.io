@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Five ways my benchmarks lied to me</title>
+<link rel="stylesheet" href="../../style.css">
+</head>
+<body>
+<main><article>
+<h1>Five ways my benchmarks lied to me</h1>
+<p>I spent a few weeks benchmarking two things: five parallel kernels in C with OpenMP, and seven concurrent data structures in Java, lock-based and lock-free, timed from 1 to 16 threads. Both ran on the same 4-core i5-7500 under macOS. The Java side alone is 1,890 timed runs.</p>
+<p>None of the bugs below crashed anything or printed an error. Each one produced numbers that looked reasonable, sometimes better than reasonable, and each would have gone into the report if I hadn't gotten suspicious. That's the part worth writing down.</p>
+
+<h2>1. I was benchmarking the clock</h2>
+<p>The Java harness runs each structure for a fixed time and counts operations. The first version checked the deadline after every operation:</p>
+<pre><code>// roughly what the first version did
+while (System.nanoTime() &lt; deadline) {
+    doOneOperation();
+    count++;
+}</code></pre>
+<p>Every fast structure hit the same ceiling, about 29 million operations per second, whatever the thread count. A read-only <code>peek</code> on a stack should scale with cores, and it sat flat at 29 MOPS.</p>
+<p>So I timed the clock on its own. On macOS, HotSpot keeps <code>nanoTime()</code> monotonic with a compare-and-swap on one shared word, so every call from every thread fights over the same cache line. One thread got about 30 million calls per second, and four threads got 26 million between them. My benchmark had found the throughput of <code>System.nanoTime()</code>.</p>
+<p>The fix is to look at the clock less often:</p>
+<pre><code>while (System.nanoTime() &lt; dl) {
+    for (int j = 0; j &lt; CHECK_EVERY; j++) {   // CHECK_EVERY = 64
+        int e = w[i++ &amp; MASK], k = e &gt;&gt;&gt; 2;
+        switch (e &amp; 3) {
+            case 0: ds.read(k); break;
+            case 1: ds.insert(k); break;
+            default: ds.delete(k);
+        }
+    }
+    c += CHECK_EVERY;
+}</code></pre>
+<p><code>peek</code> went from a flat 29 MOPS to over 1,400.</p>
+
+<h2>2. The garbage collector was keeping my queues alive</h2>
+<p>Next, the two linked queues (a two-lock queue and Michael-Scott) started overshooting their 2-second runs by up to 0.8 seconds. GC logs showed 125 to 160 ms pauses and a live heap growing from 95 MB to 290 MB. A queue that keeps half its operations as dequeues shouldn't grow.</p>
+<p>It wasn't growing. Its history was being kept alive. When you dequeue from a linked queue, the old sentinel node becomes garbage, but it still points at the next node. If that dead sentinel has survived long enough to be promoted to the old generation, a young collection treats its <code>next</code> pointer as a root. The node it points to survives and gets copied, along with everything after it. Each young GC was copying the entire chain of dequeued nodes.</p>
+<p>The fix is one line: point the dead node at itself, so it holds nothing alive.</p>
+<pre><code>} else if (head.compareAndSet(first, next)) {
+    first.next.set(first);   // self-link: a stale reader sees this and fails its head check
+    return next.value;
+}</code></pre>
+<p>I found out afterwards that <code>java.util.concurrent.ConcurrentLinkedQueue</code> does the same thing, for the same reason.</p>
+
+<h2>3. Sleep stops the clock</h2>
+<p>A full sweep takes about an hour, long enough for the Mac to fall asleep partway through. <code>System.nanoTime()</code> stops while macOS sleeps, so a run that straddles a sleep comes back looking short and slow, which reads as a performance result and not as a broken run.</p>
+<p><code>caffeinate -i</code> wasn't enough to prevent it. Now the sweep runs under <code>caffeinate -dims</code> on AC power, and before any results are accepted, a script rejects every raw file with an elapsed time above 2.05 seconds.</p>
+
+<h2>4. OpenMP made my loop 5.5x slower</h2>
+<p>This one was in the C kernels: squaring a matrix whose entries are all −1, 0 or 1. The hot loop is just <code>c[j] += b[j]</code> over a row. With Apple clang, that loop written inside an <code>omp parallel for</code> ran in 0.48 s at N = 1024. The same loop in a build without OpenMP ran in 0.087 s, 5.5 times faster, on one thread in both cases.</p>
+<p>The disassembly explained it. The sequential build had 108 <code>vpaddd</code> instructions in the kernel and the OpenMP build had 36. OpenMP moves the body of a parallel region into a separate function, and in that function the loop was vectorised but barely unrolled.</p>
+<p>The fix is to give the compiler a small function with no aliasing questions, and to stop it inlining that function back into the parallel region:</p>
+<pre><code>NOINLINE static void row_add(int32_t *restrict c,
+                             const int32_t *restrict b, int n)
+{
+    for (int j = 0; j &lt; n; j++) c[j] += b[j];
+}</code></pre>
+<p>After that, the OpenMP binary on one thread is within 2% of the sequential binary on all five problems.</p>
+<p>This bug flatters you. Speedup is time at one thread divided by time at <em>t</em> threads, so a slow one-thread baseline makes every speedup look better. My speedup plots would have improved while the code got slower.</p>
+
+<h2>5. zsh ran the default algorithm six times</h2>
+<p>The sweep script passed options through a variable:</p>
+<pre><code>args="--algo bmm --block 4"
+prog $args</code></pre>
+<p>Bash splits <code>$args</code> into four arguments. zsh doesn't, so the program received one argument, <code>"--algo bmm --block 4"</code>, matched no option, and quietly ran the default unblocked kernel. I got a table of six "block sizes" that were all the same algorithm. They were, unsurprisingly, identical.</p>
+<p>Now any unrecognised option is a hard error, with a hint when the argument contains a space. I'd rather the program refuse to run than report a confident wrong number.</p>
+
+<h2>What was left once the numbers were honest</h2>
+<p>With all five fixed, the stacks showed something I didn't expect. Under a write-heavy load (half pushes, half pops), the lock-free Treiber stack falls from 51 MOPS at one thread to 9.6 at four. Every thread fights over the same <code>top</code> pointer, and failed compare-and-swaps add more traffic to that one contended cache line. The plain lock-based stack holds 19.5, twice as much. The elimination stack is the outlier: pushes and pops that collide cancel each other in a side array and never touch <code>top</code>, which gives it 3.3 to 4.4 times Treiber's throughput from 8 to 16 threads.</p>
+<figure class="chart">
+<svg viewBox="0 0 640 300" role="img" aria-labelledby="ct"><title id="ct">Throughput in MOPS against thread count, N = 1000, 50% push 50% pop</title>
+<line x1="44" x2="532" y1="264.0" y2="264.0" class="g"/><text x="36" y="268.0" text-anchor="end" class="ax">0</text>
+<line x1="44" x2="532" y1="181.3" y2="181.3" class="g"/><text x="36" y="185.3" text-anchor="end" class="ax">20</text>
+<line x1="44" x2="532" y1="98.7" y2="98.7" class="g"/><text x="36" y="102.7" text-anchor="end" class="ax">40</text>
+<line x1="44" x2="532" y1="16.0" y2="16.0" class="g"/><text x="36" y="20.0" text-anchor="end" class="ax">60</text>
+<text x="44.0" y="282" text-anchor="middle" class="ax">1</text>
+<text x="76.5" y="282" text-anchor="middle" class="ax">2</text>
+<text x="141.6" y="282" text-anchor="middle" class="ax">4</text>
+<text x="271.7" y="282" text-anchor="middle" class="ax">8</text>
+<text x="401.9" y="282" text-anchor="middle" class="ax">12</text>
+<text x="532.0" y="282" text-anchor="middle" class="ax">16</text>
+<text x="288" y="298" text-anchor="middle" class="ax">threads</text>
+<text x="48" y="10" class="ax">MOPS</text>
+<polyline fill="none" stroke="#1f9e8f" stroke-width="2" stroke-linejoin="round" points="44.0,52.7 76.5,204.8 141.6,224.5 206.7,225.3 271.7,224.8 336.8,224.7 401.9,224.9 466.9,221.2 532.0,224.4"/>
+<circle cx="44.0" cy="52.7" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 1 threads: 51.1 MOPS</title></circle>
+<circle cx="76.5" cy="204.8" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 2 threads: 14.3 MOPS</title></circle>
+<circle cx="141.6" cy="224.5" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 4 threads: 9.6 MOPS</title></circle>
+<circle cx="206.7" cy="225.3" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 6 threads: 9.4 MOPS</title></circle>
+<circle cx="271.7" cy="224.8" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 8 threads: 9.5 MOPS</title></circle>
+<circle cx="336.8" cy="224.7" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 10 threads: 9.5 MOPS</title></circle>
+<circle cx="401.9" cy="224.9" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 12 threads: 9.5 MOPS</title></circle>
+<circle cx="466.9" cy="221.2" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 14 threads: 10.3 MOPS</title></circle>
+<circle cx="532.0" cy="224.4" r="4" fill="#1f9e8f" stroke="#141922" stroke-width="2"><title>Treiber (CAS), 16 threads: 9.6 MOPS</title></circle>
+<text x="542.0" y="228.4" class="dl">Treiber (CAS)</text>
+<polyline fill="none" stroke="#b0860f" stroke-width="2" stroke-linejoin="round" points="44.0,137.3 76.5,229.2 141.6,183.6 206.7,183.6 271.7,185.3 336.8,183.6 401.9,184.3 466.9,183.1 532.0,184.8"/>
+<circle cx="44.0" cy="137.3" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 1 threads: 30.7 MOPS</title></circle>
+<circle cx="76.5" cy="229.2" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 2 threads: 8.4 MOPS</title></circle>
+<circle cx="141.6" cy="183.6" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 4 threads: 19.5 MOPS</title></circle>
+<circle cx="206.7" cy="183.6" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 6 threads: 19.5 MOPS</title></circle>
+<circle cx="271.7" cy="185.3" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 8 threads: 19.0 MOPS</title></circle>
+<circle cx="336.8" cy="183.6" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 10 threads: 19.5 MOPS</title></circle>
+<circle cx="401.9" cy="184.3" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 12 threads: 19.3 MOPS</title></circle>
+<circle cx="466.9" cy="183.1" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 14 threads: 19.6 MOPS</title></circle>
+<circle cx="532.0" cy="184.8" r="4" fill="#b0860f" stroke="#141922" stroke-width="2"><title>LockStack, 16 threads: 19.2 MOPS</title></circle>
+<text x="542.0" y="188.8" class="dl">LockStack</text>
+<polyline fill="none" stroke="#8f7be8" stroke-width="2" stroke-linejoin="round" points="44.0,28.3 76.5,63.7 141.6,116.2 206.7,118.9 271.7,105.0 336.8,108.7 401.9,92.6 466.9,121.6 532.0,115.9"/>
+<circle cx="44.0" cy="28.3" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 1 threads: 57.0 MOPS</title></circle>
+<circle cx="76.5" cy="63.7" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 2 threads: 48.5 MOPS</title></circle>
+<circle cx="141.6" cy="116.2" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 4 threads: 35.8 MOPS</title></circle>
+<circle cx="206.7" cy="118.9" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 6 threads: 35.1 MOPS</title></circle>
+<circle cx="271.7" cy="105.0" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 8 threads: 38.5 MOPS</title></circle>
+<circle cx="336.8" cy="108.7" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 10 threads: 37.6 MOPS</title></circle>
+<circle cx="401.9" cy="92.6" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 12 threads: 41.5 MOPS</title></circle>
+<circle cx="466.9" cy="121.6" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 14 threads: 34.4 MOPS</title></circle>
+<circle cx="532.0" cy="115.9" r="4" fill="#8f7be8" stroke="#141922" stroke-width="2"><title>Elimination, 16 threads: 35.8 MOPS</title></circle>
+<text x="542.0" y="119.9" class="dl">Elimination</text>
+</svg>
+<figcaption>Stack throughput, N = 1,000, 50% push / 50% pop, mean of 5 runs. Hover a point for its value.</figcaption>
+</figure>
+<details><summary>data</summary>
+<table><tr><th>threads</th><th>Treiber (CAS)</th><th>LockStack</th><th>Elimination</th></tr>
+<tr><td>1</td><td>51.1</td><td>30.7</td><td>57.0</td></tr>
+<tr><td>2</td><td>14.3</td><td>8.4</td><td>48.5</td></tr>
+<tr><td>4</td><td>9.6</td><td>19.5</td><td>35.8</td></tr>
+<tr><td>6</td><td>9.4</td><td>19.5</td><td>35.1</td></tr>
+<tr><td>8</td><td>9.5</td><td>19.0</td><td>38.5</td></tr>
+<tr><td>10</td><td>9.5</td><td>19.5</td><td>37.6</td></tr>
+<tr><td>12</td><td>9.5</td><td>19.3</td><td>41.5</td></tr>
+<tr><td>14</td><td>10.3</td><td>19.6</td><td>34.4</td></tr>
+<tr><td>16</td><td>9.6</td><td>19.2</td><td>35.8</td></tr>
+</table>
+</details>
+<p>One thing I can't explain yet: LockStack drops to 8.4 MOPS at two threads and climbs back to 19.5 at four, and all five runs agree. I haven't worked out why. If you know, I'd like to hear it.</p>
+
+<h2>What I do differently now</h2>
+<p>Each of these produced a believable number, so "does the output look reasonable" was never going to catch them. What caught them was cross-checking things that should agree: the clock's own throughput against the benchmark's, the requested run time against the measured one, the OpenMP binary on one thread against the sequential binary, and six configurations that should have differed and didn't. The C harness now prints a checksum on every run and refuses to report a time for a result it couldn't verify against the sequential version.</p>
+<p>Everything is in <a href="https://github.com/brightyorcerf/parallel-universe">parallel-universe</a>: the code, every raw run, the gnuplot scripts and both reports. If you rerun it on Linux, I'd like to know whether the <code>nanoTime</code> ceiling disappears. <a href="mailto:thetejaansh@gmail.com">Email me</a>.</p>
+<a class="back" href="../../">home</a>
+</article></main>
+</body>
+</html>

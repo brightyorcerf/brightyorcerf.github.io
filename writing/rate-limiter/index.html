@@ -9,32 +9,69 @@
 <body>
 <main><article>
 <h1>When Redis goes away</h1>
-<p>Most posts about distributed token buckets say that concurrent requests break them. I wanted to watch it happen before I believed it, and then fix it in a way I could defend. The setup: Express middleware on Node.js, bucket state in Redis, token bucket as the algorithm.</p>
-<!-- TODO(evidence): this opening promises a reproduction. Add the script (N concurrent requests from M instances against a bucket of size K) and its output: how many requests were admitted before and after the fix. -->
+<p>Most write-ups of distributed rate limiters say that concurrent requests break a naive token bucket. Very few show it happening. I'd built a token-bucket middleware for Express with its state in Redis, and before trusting my fix I wanted to watch the bug happen.</p>
+<p>The experiment: a bucket with capacity 100 and a refill rate of zero, so exactly 100 requests may ever be admitted. Fire 1,000 checks at it and count how many get through. Ten trials per configuration, on a 4-core i5-7500 with Redis 8.4 on localhost.</p>
 
-<h2>The read-write gap</h2>
-<p>The bug isn't in the bucket math. It's in the gap between reading the token count and writing the decremented count back. On one process that gap barely matters. With several instances sharing a bucket, it becomes a real window: two requests read the same count, both decide they're allowed, and both decrement. A request that should have been denied gets through.</p>
-<p>A lock in the application layer only moves the race into whatever implements the lock, and adds a slower part that can fail. Instead, I moved the whole read-decide-write sequence into Redis as a Lua script. Redis runs a script as a single operation, so nothing can interleave and the gap no longer exists.</p>
-<p>The script reads the last-refill timestamp and the token count, works out how many tokens have regenerated using <code>redis.call('TIME')</code> (Redis's clock, not the caller's), applies the refill, decides, and writes the new state. Keys get a TTL slightly longer than a full refill, so idle buckets expire instead of piling up.</p>
-<!-- TODO(evidence): paste the Lua script as a <pre><code> block. -->
-<p>The middleware added 0.4ms per request: one round trip to Redis plus the script.</p>
-<!-- TODO(evidence): under what load, at which percentile, and was Redis on the same host or across a network? -->
+<h2>The naive version</h2>
+<p>Read the count, decide in JavaScript, write the count back:</p>
+<pre><code>async function naiveCheck(client, key) {
+  const [tokens] = await client.hmGet(key, ['tokens']);
+  const t = tokens === null ? K : Number(tokens);
+  if (t &lt; 1) return false;
+  await client.hSet(key, { tokens: String(t - 1) });
+  return true;
+}</code></pre>
+<table>
+<tr><th>processes × in flight</th><th>naive admitted</th><th>Lua script</th></tr>
+<tr><td>1 × 1</td><td>100</td><td>100</td></tr>
+<tr><td>1 × 2</td><td>200</td><td>100</td></tr>
+<tr><td>1 × 1,000</td><td>1,000</td><td>100</td></tr>
+<tr><td>2 × 1</td><td>196–200</td><td>100</td></tr>
+<tr><td>4 × 1</td><td>278–359</td><td>100</td></tr>
+<tr><td>4 × 8</td><td>1,000</td><td>100</td></tr>
+</table>
+<p>The first row is the control: one request at a time, and the naive version is correct.</p>
+<p>The second row surprised me. The usual explanation is that this race needs several servers sharing one bucket. It doesn't. A single Node process with just two requests in flight admitted <em>exactly</em> 200, in all ten trials. Both requests go out on the same Redis connection, so the commands arrive in the order read, read, write, write. Both reads see the same count, both writes store the same decremented value, and two requests spend one token. The limit gets multiplied by the concurrency, as reliably as clockwork. More processes just make it noisier.</p>
+<p>The last row is worse than over-admission. At 8 requests in flight per process, the bucket never emptied at all. With 32 reads landing on the same value, almost every write overwrites another, so the stored count barely moves while 1,000 requests walk through.</p>
 
-<h2>When Redis isn't there</h2>
-<p>A rate limiter that hard-fails when Redis is unreachable takes your API down harder than the traffic spike it was meant to absorb.</p>
-<p>So every check races a 250ms timeout against Redis. If Redis answers first, the request gets the real, atomic decision. If the timeout wins, the middleware falls back to a token count kept in that instance's own memory, refilled on the same schedule but not shared between instances. With N instances, the effective limit during an outage can reach N times the configured one. I accept that on purpose: a looser limit is better than depending on the thing that just stopped responding. The fallback decision itself takes 1–2ms.</p>
-<!-- TODO(evidence): during an outage, does every request still wait the full 250ms before falling back, or is there a circuit breaker? Say which. Without one, each request pays 250ms plus the fallback. -->
-<p>Allowed and denied requests are counted separately on both paths. Without that, a Redis outage and a traffic spike look identical on a dashboard.</p>
+<h2>The fix</h2>
+<p>A lock in the application layer just moves the race into whatever implements the lock. Instead, the whole read-refill-decide-write cycle runs inside Redis as one Lua script, and Redis runs a script without letting anything else in between:</p>
+<pre><code>local t   = redis.call('TIME')
+local now = (tonumber(t[1]) * 1000) + math.floor(tonumber(t[2]) / 1000)
 
-<h2>What I'd keep</h2>
-<ul>
-<li>Put atomicity next to the shared state. Once the logic lived in a Lua script, I stopped thinking about locks.</li>
-<li>Design the failure path on purpose, benchmark it, and give it its own metrics.</li>
-<li>The timeout matters more than it looks. I underestimated the 250ms number until I load-tested the tail. For every request near Redis's p99, it decides whether you get a slow correct answer or a fast approximate one.</li>
-</ul>
-<!-- TODO(evidence): add the tail-latency histogram from that load test. -->
-<p>If you've built a fallback for a distributed limiter and handled the outage case differently, <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
-<!-- TODO: add the repo link once it's public. Don't publish placeholder text. -->
+local state       = redis.call('HMGET', key, 'tokens', 'last_refill')
+local tokens      = tonumber(state[1])
+local last_refill = tonumber(state[2])
+if tokens == nil or last_refill == nil then
+  tokens = capacity
+  last_refill = now
+end
+
+-- A backwards clock must not mint or destroy tokens.
+local elapsed = now - last_refill
+if elapsed &lt; 0 then elapsed = 0 end
+tokens = math.min(capacity, tokens + (elapsed / 1000) * rate)</code></pre>
+<p>The clock comes from Redis's <code>TIME</code>, not from the calling server, because servers' clocks disagree, and a shared bucket refilled by skewed clocks refills at the wrong rate. It admitted exactly 100 in every trial of every configuration.</p>
+<p>One detail took me a while. When a request is denied, nothing was consumed, so the script doesn't rewrite the state. But it still has to refresh the key's expiry. Otherwise a client that keeps hammering a full bucket would eventually let its own bucket expire, and get handed a fresh, full one.</p>
+<p>The cost, from the repo's benchmark at one request at a time over loopback, is 0.16 to 0.18 ms added at the median across three runs. I'd been quoting 0.4 ms from an older measurement. Today's number is smaller, and it's the one I can reproduce.</p>
+
+<h2>Dead is easy. Hung is not.</h2>
+<p>A rate limiter that fails whenever Redis does would take the API down with it. So <code>RedisStore</code> gives every check a 250 ms budget. When Redis is unusable, it either lets the request through or rejects it, depending on a <code>failOpen</code> option (there's no answer that's right for every service). Allowed and denied requests are counted separately in degraded mode, so an outage doesn't look like a traffic spike on a dashboard. The client also disables node-redis's offline queue, because that queue is what once let a Redis blip hang every request indefinitely.</p>
+<p>Then I measured each check while I broke Redis in two different ways: <code>SIGKILL</code> (the process is gone, connections are refused) and <code>SIGSTOP</code> (the process is frozen, but the kernel keeps its TCP connections open). 300 sequential checks per phase:</p>
+<table>
+<tr><th>Redis is</th><th>p50</th><th>p99</th><th>degraded</th><th>300 checks took</th></tr>
+<tr><td>healthy</td><td>0.21 ms</td><td>0.36 ms</td><td>0</td><td>0.1 s</td></tr>
+<tr><td>dead (SIGKILL)</td><td>0.01 ms</td><td>0.02 ms</td><td>300</td><td>0.0 s</td></tr>
+<tr><td>hung (SIGSTOP)</td><td>251.2 ms</td><td>252.7 ms</td><td>300</td><td>75.4 s</td></tr>
+<tr><td>back up again</td><td>0.20 ms</td><td>0.37 ms</td><td>0</td><td>0.1 s</td></tr>
+</table>
+<p>A dead Redis is the cheap case. The socket closes, the client marks itself not ready, and every check fails immediately, faster even than a healthy one. A hung Redis is the expensive one. The connection still looks alive, so the client keeps sending, and every single request waits the full 250 ms for an answer that never comes. That's more than 10,000 times the cost of a dead Redis, for as long as the hang lasts, with nothing in the middleware that notices it's been the same failure 300 times in a row.</p>
+<p>What's missing is a circuit breaker: after a few consecutive timeouts, stop asking Redis for a cooldown period, and go straight to the degraded decision. I haven't built it yet. The open questions are how many timeouts should trip it and how you probe for recovery without making one unlucky request pay 250 ms each time.</p>
+<p>Recovery works without help, at least: after <code>SIGCONT</code> the next check succeeded normally, and after a full restart the client reconnected and reloaded the script on its own.</p>
+
+<h2>A trap I fell into while measuring this</h2>
+<p>The first time I ran the outage test, one check during the hung phase took 30 minutes. The second time, 25. It wasn't Redis. The Mac's power log showed it had gone to sleep for 1,808 and 1,523 seconds, which matched the two stalls. Timers can't fire while the machine is asleep, so neither could the 250 ms timeout. This is the same trap I wrote about in <a href="../benchmarks-lied/">five ways my benchmarks lied to me</a>, and I still walked into it. The numbers above come from a run under <code>caffeinate -dims</code>, where the slowest of the 300 hung checks took 253 ms.</p>
+<p>Both experiments are in the <a href="https://github.com/brightyorcerf/rate-limiter">repo</a> under <code>experiments/</code>. If you've tuned a circuit breaker in front of Redis, I'd like to know what thresholds you landed on: <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
 <a class="back" href="../../">home</a>
 </article></main>
 </body>

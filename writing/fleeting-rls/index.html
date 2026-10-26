@@ -9,33 +9,52 @@
 <body>
 <main><article>
 <h1>Postgres said no</h1>
-<p>About three weeks after Fleeting went live on the App Store, a user emailed me. They had paid, and they were locked out of the thing they paid for. Nobody else had reported it, and I hadn't touched the paywall code in weeks. My first reaction was that this couldn't happen.</p>
-<p>Fleeting is a time-capsule iOS app I built and shipped alone: a SwiftUI client, Postgres on Supabase, and RevenueCat for App Store purchases. There is no backend server. The client talks to Postgres directly, and every paywall rule lives in the database as Row-Level Security policies. Clients can't write entitlements. The one privileged write goes through a <code>SECURITY DEFINER</code> function, which runs with its owner's privileges instead of the caller's.</p>
-<p>I liked that design. I just hadn't asked what happens when the message telling Postgres that someone paid never arrives.</p>
+<p>Fleeting is a time-capsule iOS app I built and shipped alone. It has no backend server: the SwiftUI client talks to Postgres on Supabase directly, and Row-Level Security decides what each user can read and write. Purchases go through RevenueCat.</p>
+<p>At first, Pro features were enforced in exactly one place, the SwiftUI view that showed the paywall. The database had no idea who had paid. An audit caught it, and on 13 August I moved enforcement into Postgres. That same day, the code I wrote to protect paying users revoked a valid subscription.</p>
 
-<h2>How a purchase becomes a row</h2>
-<p>App Store purchase → RevenueCat → webhook to a Supabase Edge Function → the function calls the <code>SECURITY DEFINER</code> RPC → a row in <code>entitlements</code>. The client never touches this path. It only reads <code>entitlements</code> through RLS afterwards.</p>
-<!-- TODO(evidence): paste the real RLS policy and the RPC signature here as <pre><code> blocks. -->
-<p>Every premium-feature policy checks that one table. No webhook, no row. No row, no access, even though Apple's receipt says the user paid.</p>
+<h2>Teaching the database who paid</h2>
+<p>RevenueCat is the only party that actually knows who is subscribed, so it tells the database through a webhook. The webhook writes to a <code>subscribers</code> table, and every Pro feature checks one function:</p>
+<pre><code>create or replace function public.is_subscriber()
+returns boolean
+language sql stable security definer
+set search_path to 'public'
+as $$
+  select exists (
+    select 1 from public.subscribers s
+    where s.user_id = (select auth.uid())
+      and s.is_active
+      and (s.expires_at is null or s.expires_at &gt; now())
+  );
+$$;</code></pre>
+<p><code>subscribers</code> has no insert, update or delete policy at all. The only thing that can write to it is the webhook, running as <code>service_role</code>, which bypasses RLS. The fishing feature returns <code>{"status":"locked"}</code> unless <code>is_subscriber()</code> is true, and the storage policy refuses attachment uploads from non-subscribers.</p>
+<p>The webhook needed more care than the policy did. RevenueCat retries and doesn't guarantee order, so an old event can land after a new one and bring back a stale state. Each row stores the event's timestamp, and anything not strictly newer gets dropped. <code>CANCELLATION</code> doesn't revoke anything either. In RevenueCat it means auto-renew was switched off, and the user has paid through the end of the period, so <code>expires_at</code> decides. The shared secret gets checked before the body is even parsed.</p>
 
-<h2>Where the webhook went</h2>
-<p>RevenueCat's delivery log showed the attempt as failed. The Edge Function had been cold and was still starting when RevenueCat stopped waiting for a response. RevenueCat retried a couple of times on its own schedule, and those retries didn't land either. I never fully worked out why. Nothing on my side alerted, because nothing was watching for failed deliveries. A support email was the only alarm I had.</p>
-<!-- TODO(evidence): add the delivery log lines with timestamps, the cold-start duration, and RevenueCat's timeout. If you later found why the retries failed, replace "I never fully worked out why" with that. -->
+<h2>The failure mode flipped</h2>
+<p>Before, the worst case was a free user getting Pro. Now it was a paying user getting nothing. RevenueCat charges them, the webhook event gets lost or arrives while the function is down, the row never appears, and Postgres says no to someone who just paid. The webhook had become a single point of failure for the one thing you can't get wrong.</p>
+<p>So I gave the client a way to repair itself. If the RevenueCat SDK on the phone says <em>subscribed</em> and the server says <em>locked</em>, the app calls an Edge Function called <code>entitlement-repair</code>. It reads the user ID from the verified login token, never from the request body (a body-supplied ID would let anyone grant Pro to any account). It asks RevenueCat's REST API directly, with a secret key the app never sees, and writes the row.</p>
 
-<h2>Reconciling against the source of truth</h2>
-<p>I didn't want to fix this by letting the client vouch for itself. A client that can assert it's entitled is a paywall with a hole in it, so the fix had to stay on the server.</p>
-<p>I added a path that doesn't depend on the webhook at all. A scheduled Edge Function runs every few hours, asks RevenueCat's REST API for each user's current entitlement, and compares the answer with the <code>entitlements</code> table. A paying user with no row gets one, written through the same RPC the webhook would have called. The webhook is now the fast path rather than the only path. In the worst case, a user waits a few hours instead of staying locked out until they email me.</p>
-<!-- TODO(evidence): show the reconciliation query, including how it chooses which users to check. If it reads from entitlements, it skips exactly the users who have no row. -->
-<p>The RLS policies didn't change. What changed was the assumption that one event, delivered exactly once, was the only way the truth reached the table.</p>
+<h2>The repair that harmed</h2>
+<p>The first version wrote whatever RevenueCat answered, including "not subscribed". Its lookup was roughly this:</p>
+<pre><code>fetch(`https://api.revenuecat.com/v1/subscribers/${userId}`, ...)</code></pre>
+<p>RevenueCat app user IDs are case-sensitive. The app registers users with <code>Purchases.logIn(uid.uuidString)</code>, and Swift's <code>uuidString</code> is uppercase. Supabase's <code>auth.getUser()</code> returns the same UUID in lowercase. So the repair function asked about a customer that didn't exist. RevenueCat's lookup endpoint quietly creates a customer if there isn't one, so the answer wasn't an error. It was a brand-new, empty customer with no entitlements.</p>
+<p>The function took that at face value and wrote <code>is_active = false</code> over a valid subscription. The path I'd built to heal a dropped event had just revoked a real one.</p>
+<p>The worst part was that the same case mismatch had already bitten me in July. Photo and voice attachments were vanishing with no error. The insert policy on capsules compared <code>uuid = uuid</code>, which ignores case, so it passed. The storage policy compared the folder name as text, which doesn't ignore case, so every upload into an uppercase folder was denied. The client swallowed the error and saved the capsule without its media.</p>
 
-<h2>What I'd tell someone putting a paywall in RLS</h2>
-<ul>
-<li>Webhooks are an input, not the source of truth. If the real source (Apple, Stripe, RevenueCat) can be queried, reconcile against it on a schedule.</li>
-<li>In a deny-by-default policy, a missing row looks exactly like a user who never paid. That's correct, and it's also why a delivery failure stays invisible until someone complains.</li>
-<li>Alert on failed webhook deliveries, not only on errors in your own code.</li>
-</ul>
-<p>I didn't find this with a threat model. I found it because someone paid for something and couldn't use it. If you've built entitlements on RLS and handled delivery failures differently, I'd like to hear how: <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
-<!-- TODO: add the App Store link and the repo link once they exist. Don't publish placeholder text. -->
+<h2>Grant only</h2>
+<p>The lookup now tries the uppercase ID first, since that's what the app registers, and falls back to lowercase for accounts created any other way. But the case fix wasn't the real fix. This was:</p>
+<pre><code>// GRANT-ONLY. This function must never revoke.
+if (!active) {
+  return new Response(
+    JSON.stringify({ status: "ok", is_active: false, changed: false }),
+    { headers: { "Content-Type": "application/json" } },
+  );
+}</code></pre>
+<p>The repair function only runs because the server's view is already known to be incomplete, so a negative answer from it means very little. A wrong key, the wrong case or a RevenueCat blip would all look like "not subscribed". Revocation now belongs to the webhook alone, which receives the <code>EXPIRATION</code> and <code>REFUND</code> events and is the authority for them.</p>
+<p>One more detail: the repair deliberately doesn't set <code>event_ms</code>. That column exists to order webhook events against each other, and a made-up timestamp from the repair path could make the next genuine webhook event look stale, so it would be dropped.</p>
+
+<h2>What stuck with me</h2>
+<p>Both bugs came from treating a confident answer as an authoritative one. RevenueCat didn't fail. It answered a slightly different question, about a customer my request had just created. Postgres didn't fail either. It compared two strings exactly as asked. A repair path only runs when something has already gone wrong, so the only safe thing it can do is move toward the outcome that's cheap to be wrong about. Here, that's granting.</p>
+<p>The question I'm left with: what other APIs quietly create the thing you asked about when you read it? If one has bitten you, <a href="mailto:thetejaansh@gmail.com">tell me</a>.</p>
 <a class="back" href="../../">home</a>
 </article></main>
 </body>

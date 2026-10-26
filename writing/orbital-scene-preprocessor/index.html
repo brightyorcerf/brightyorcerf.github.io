@@ -3,41 +3,94 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Squeezing YOLOv8n into orbit</title>
+<title>My satellite&#x27;s infrared was made of RGB</title>
 <link rel="stylesheet" href="../../style.css">
 </head>
 <body>
 <main><article>
-<h1>Squeezing YOLOv8n into orbit</h1>
-<p>I wanted to know how much of a satellite's imagery needs to come down at all, if the satellite can work out what's in a frame before it transmits anything. To test it, I set myself a constraint: run object detection on multispectral imagery with 2 CPU cores and 4GB of RAM, roughly the compute of a small satellite's onboard computer, and stay under 400ms per frame at p99. No GPU.</p>
-<p>Stock YOLOv8n at FP32 came in at around 560ms p99 on that profile, over budget before any variance under load.</p>
-<!-- TODO(evidence): name the exact board or VM profile, ONNX Runtime version, thread count, number of runs, and warm-up policy. -->
+<h1>My satellite&#x27;s infrared was made of RGB</h1>
+<p>A satellite can photograph far more than it can send home. A ground pass might give you 32 kbps for five minutes, about 1.2 MB, and a single lossless image tile costs half of that. So I built a preprocessor that runs object detection in orbit and sends down what it found instead of what it saw: a few hundred bytes per tile saying <em>what</em>, <em>where</em> and <em>how confident</em>.</p>
+<p>The detector is a YOLOv8n with its first layer widened from three input channels to six, to take Sentinel-2's visible bands (B2, B3, B4) plus near- and short-wave infrared (B8, B11, B12). This post is mostly about how those three extra channels turned out to be fake, and what the network did with them anyway.</p>
 
-<h2>Why I didn't drop bands</h2>
-<p>YOLOv8n is already the smallest model in the YOLOv8 family, so a smaller architecture wasn't really on the table. The other obvious way to cut compute was to feed it fewer channels. The input is six-band multispectral, not RGB, and dropping bands cost more accuracy than anything else I tried. That left quantization: INT8 instead of FP32, through ONNX Runtime.</p>
-<!-- TODO(evidence): say how the first conv layer was adapted to 6 bands, which dataset you used, and the FP32 baseline mAP@0.5. -->
+<h2>Where the infrared came from</h2>
+<p>I couldn't download training data with real short-wave infrared at a resolution where ships and planes are visible, and there's a physical reason it barely exists. SWIR wavelengths are roughly three times longer than visible light, so the same aperture resolves roughly three times less detail, and silicon detectors can't see SWIR at all. Sentinel-2 has 10 m visible and 20 m SWIR. WorldView-3 gets 31 cm panchromatic and about 3.7 m in SWIR.</p>
+<p>So I trained on DOTA, an aerial RGB dataset, and made the other bands up:</p>
+<pre><code># data/synthetic_bands.py
+b8      = np.clip(0.25 * r + 0.45 * g + 0.30 * b, 0.0, 1.0)
+raw_b11 = np.clip(0.80 * r + 0.30 * g - 0.20 * b, 0.0, 1.0)
+raw_b12 = np.clip(0.70 * r + 0.20 * g - 0.10 * b, 0.0, 1.0)</code></pre>
+<p>B11 and B12 are then downsampled by two and upsampled back, to imitate SWIR's coarser 20 m grid.</p>
 
-<h2>Paying for INT8</h2>
-<p>INT8 gives up accuracy to win back latency and memory, and how much it gives up depends on your model and your data. Published quantization benchmarks told me little about mine. I used static post-training quantization in ONNX Runtime, calibrated on a few hundred frames from the target domain rather than a generic dataset. If you calibrate on the wrong distribution, accuracy can drop quietly, and you won't notice until you've committed to the quantized weights.</p>
-<p>The final layers of the detection head stayed out of the INT8 pass. Quantizing them cost a lot of accuracy on small objects and saved little latency, so that was the one place I kept precision on purpose.</p>
+<h2>The arithmetic that undermines them</h2>
+<p>Nothing in those three lines wasn't already in R, G and B. A convolution's first job is computing weighted mixes of its input channels, so the network could form any of these itself. Handing them over pre-mixed adds no information.</p>
+<p>You can see it in the singular values of a derived six-channel tile (mean-centred, normalised to the largest):</p>
+<pre><code>tile                 σ1      σ2      σ3      σ4      σ5      σ6
+P0007_00000_01497   1.0000  0.0976  0.0550  0.0461  0.0003  0.0000   cliff 147x
+P0961_01920_00471   1.0000  0.1728  0.0837  0.0543  0.0006  0.0000   cliff  93x
+P1854_01440_01920   1.0000  0.1318  0.0549  0.0202  0.0003  0.0000   cliff  61x
+P2794_00000_03360   1.0000  0.1764  0.0538  0.0297  0.0003  0.0000   cliff  88x</code></pre>
+<p>Six channels, four real components, then a drop of 60 to 150 times into numerical noise. Three of the four are the original RGB. The fourth is the blur from resampling B11 and B12, which is still a function of RGB.</p>
+
+<h2>And yet the network cares</h2>
+<p>So I expected dropping the fake bands to cost nothing. An earlier version of my README said exactly that, and said it "reproduces on DOTA". I wrote it before I'd measured anything on DOTA, and it was wrong.</p>
+<p>Zeroing bands at inference, over 96 held-out tiles (differences of about 0.01 are noise at this sample size):</p>
 <table>
-<tr><th></th><th>FP32</th><th>INT8</th></tr>
-<tr><td>p99 latency</td><td>~560 ms</td><td>307.65 ms</td></tr>
-<tr><td>speed</td><td>1×</td><td>1.83×</td></tr>
-<tr><td>model size</td><td>1×</td><td>3.43× smaller</td></tr>
-<tr><td>mAP@0.5</td><td>baseline</td><td>−0.9 points</td></tr>
+<tr><th>dropped</th><th>mAP@0.5</th><th>change</th></tr>
+<tr><td>nothing</td><td>0.836</td><td></td></tr>
+<tr><td>B3 (green)</td><td>0.847</td><td>+0.011</td></tr>
+<tr><td>B8 (fake near-IR)</td><td>0.844</td><td>+0.008</td></tr>
+<tr><td>B12 (fake SWIR)</td><td>0.843</td><td>+0.007</td></tr>
+<tr><td>B11 (fake SWIR)</td><td>0.833</td><td>−0.003</td></tr>
+<tr><td>B11 and B12</td><td>0.791</td><td>−0.046</td></tr>
+<tr><td>B4 (red)</td><td>0.786</td><td>−0.051</td></tr>
+<tr><td>B2 (blue)</td><td>0.770</td><td>−0.066</td></tr>
+<tr><td>all six (control)</td><td>0.000</td><td></td></tr>
 </table>
-<p>Quantization alone closed the gap. I expected to need operator fusion or batching on top of it, and I didn't.</p>
+<p>Either fake band alone barely matters, but both together cost 5.4% relative. The two bands the network leans on hardest are plain blue and red, not the infrared the whole design was built around.</p>
+<p>These two results don't contradict each other. The extra channels carry no new information, but the network still learned to use them. I initialised the new input weights from the mean of the pretrained RGB weights (so from step zero they were live edge detectors), and 32 epochs of training pulled B11 and B12 into carrying part of the load, however redundantly. Zeroing a channel the network learned to rely on is a distribution shift, not a loss of information. <em>Information-redundant</em> and <em>safe to remove</em> turn out to be different claims.</p>
+<p>The honest summary: the six-channel stem is correct engineering for a sensor this project doesn't have.</p>
 
-<h2>Deciding what to send down</h2>
-<p>A detection made in orbit is useless if the downlink can't carry it, and downlink is scarcer than compute. So the preprocessor also decides what's worth transmitting. Detections are serialized into protobuf briefs. SGP4, the standard model for predicting a satellite's position from its published orbital elements, tells the system in advance which pass windows matter, so it doesn't spend compute or bandwidth outside them.</p>
-<p>Sending briefs instead of raw frames cut the payload by 1,484×. That ratio depends on how many detections a frame holds, because what comes down is a list of findings, not the image.</p>
-<!-- TODO(evidence): give the raw frame size, average brief size, and detections per frame behind 1,484x. Say whether the SGP4 windows are imaging targets or ground-station passes. -->
+<h2>The fake bands also cost time</h2>
+<p>Deriving the bands takes two <code>cv2.resize</code> calls per tile. I benchmarked the pipeline in Docker held to two cores and 4 GB, over 95 held-out tiles. That's x86 under cgroups, a stand-in for a small onboard computer and not a claim about ARM.</p>
+<table>
+<tr><th>2 cores, 4 GB</th><th>p50</th><th>p99</th><th>mean</th></tr>
+<tr><td>preprocess</td><td>87.2 ms</td><td>215.9 ms</td><td>88.1 ms</td></tr>
+<tr><td>inference (INT8)</td><td>88.1 ms</td><td>185.8 ms</td><td>82.4 ms</td></tr>
+<tr><td>end to end</td><td>168.9 ms</td><td>307.7 ms</td><td>170.6 ms</td></tr>
+</table>
+<p>Making up the bands costs about as much as running the detector, and more at the tail. On a real six-band sensor that work wouldn't exist. The p99 of 307.7 ms is inside the 400 ms budget I set, so the margin holds even in the slowest 1% of tiles.</p>
+<p>Quantization wasn't what got it under budget. FP32 already ran at 94 ms a tile on an unconstrained machine. I used static INT8 post-training quantization for two other reasons. It makes the model 3.43x smaller (12.67 MB to 3.69 MB). And static quantization, unlike dynamic, produces bit-identical output on every run, and dynamic also makes latency depend on the data. It cost 0.9 points of mAP@0.5 (0.889 to 0.880, over 3,677 tiles). One caveat: the 32 calibration tiles came from the same split I score on, so about 0.9% of the test set was seen by the calibrator.</p>
 
-<h2>Next</h2>
-<p>Mixed precision in the first convolution, the only layer where the six bands are still separate. Some bands probably carry more detection signal than others, and giving them all the same INT8 treatment may be costing accuracy or latency I haven't measured.</p>
-<p>If you've run quantized detectors on real flight hardware, I'd like to know how far off this profile is: <a href="mailto:thetejaansh@gmail.com">email me</a>.</p>
-<!-- TODO: add the repo link once it's public. Don't publish placeholder text. -->
+<h2>Flipping bits</h2>
+<p>Radiation in orbit flips bits in memory, so I flipped bits uniformly at random across the 25 million bits of quantised weights:</p>
+<table>
+<tr><th>bits flipped</th><th>share of weights</th><th>mAP@0.5</th><th>detections</th></tr>
+<tr><td>0</td><td>0%</td><td>0.836</td><td>856</td></tr>
+<tr><td>16,384</td><td>0.07%</td><td>0.801</td><td>643</td></tr>
+<tr><td>131,072</td><td>0.52%</td><td>0.030</td><td>45</td></tr>
+<tr><td>1,048,576</td><td>4.19%</td><td>0.000</td><td>16,548</td></tr>
+</table>
+<p>Below about 0.13% the model barely notices. Between 0.13% and 0.52% it collapses. Past 1% it goes silent and then loud: 19 times the normal number of detections, every one of them wrong, and nothing anywhere in the stack raises an error.</p>
+<p><em>Which</em> bit flips matters far more than how many. Flipping 65,536 bits, all in the same bit position of each weight byte:</p>
+<table>
+<tr><th>bit flipped</th><th>weight change</th><th>mAP@0.5 retained</th></tr>
+<tr><td>0 (lowest)</td><td>±1</td><td>100%</td></tr>
+<tr><td>3</td><td>±8</td><td>99%</td></tr>
+<tr><td>4</td><td>±16</td><td>95%</td></tr>
+<tr><td>5</td><td>±32</td><td>75%</td></tr>
+<tr><td>6</td><td>±64</td><td>16%</td></tr>
+<tr><td>7 (sign)</td><td>−128</td><td>0%</td></tr>
+</table>
+<p>The bottom four bits are close to free, and nearly all the damage comes from the top two. This is a conditional measurement, not a radiation model: it says what survives a given number of flips, not how often that many happen.</p>
+<p>A CRC-32 per weight tensor catches it from outside: 252 bytes of state for a 3.69 MB model, checked in 11 ms. In the test, 65,536 flips spread across all 63 weight tensors were detected 63 out of 63 times, and restoring the tensors took mAP from 0.359 back to exactly 0.836.</p>
+
+<h2>What comes down</h2>
+<p>Over 20 held-out tiles, raw lossless imagery (CCSDS 123) is 12,234,137 bytes, about six ground contacts. The briefs for the same 20 tiles, carrying the same 21 detections, are 8,246 bytes, 0.42% of one pass. That's 1,484x fewer bytes, as the JSON the scheduler accounts for (protobuf gets it to 3,087).</p>
+<p>The confidence threshold is the real dial. Across 1,000 tiles, briefs at 0.35 match raw lossless recall and precision exactly (0.862 and 0.920) at 894 bytes a tile. Above about 0.7, the detector goes silent: zero detections across all 9,472 objects, and each tile still costs 273 bytes of envelope.</p>
+
+<h2>What doesn't transfer</h2>
+<p>DOTA is aerial imagery at 0.1 to 1 m per pixel, and the orbital part of this project models 10 m. The 0.880 mAP is a real measurement on real photographs of the right four classes, and it says nothing about orbital imagery. Storage tanks are the weak class: recall 0.653 at precision 0.936, so the model isn't confusing tanks with anything, it's missing them, mostly in cluttered refineries.</p>
+<p>If you know where to find SWIR imagery sharp enough to see ships, or you've tested a detector on real multispectral data, I'd love to know whether the infrared ever starts pulling its weight: <a href="mailto:thetejaansh@gmail.com">email me</a>. The code, the raw latency output and every measurement script are in <a href="https://github.com/brightyorcerf/orbital-preprocessor">orbital-preprocessor</a>.</p>
 <a class="back" href="../../">home</a>
 </article></main>
 </body>
