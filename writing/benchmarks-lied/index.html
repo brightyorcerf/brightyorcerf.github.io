@@ -133,7 +133,21 @@ prog $args</code></pre>
 <tr><td>16</td><td>9.6</td><td>19.2</td><td>35.8</td></tr>
 </table>
 </details>
-<p>One thing I can't explain yet: LockStack drops to 8.4 MOPS at two threads and climbs back to 19.5 at four, and all five runs agree. I haven't worked out why. If you know, I'd like to hear it.</p>
+<h2>The dip at two threads</h2>
+<p>One result didn't fit. LockStack drops from 30.7 MOPS at one thread to 8.4 at two, then climbs back to 19.5 at four, and all five runs agree. The lock-free stack falls smoothly, with no dip, so I suspected the lock, not contention on <code>top</code>.</p>
+<p>My guess was handoff cost. LockStack uses a non-fair <code>ReentrantLock</code>. With two threads, the waiting thread is usually parked, so nearly every unlock has to wake it up, which costs a system call. With more threads, a running thread can barge in and take the lock before the woken one gets scheduled, so most handoffs skip the wake-up.</p>
+<p>So I made three copies of LockStack that differ only in the lock and ran them all again:</p>
+<table>
+<tr><th>threads</th><th>LockStack</th><th>fair lock (no barging)</th><th>spin lock (no parking)</th></tr>
+<tr><td>1</td><td>29.2</td><td>29.4</td><td>33.8</td></tr>
+<tr><td>2</td><td>8.5</td><td>0.2</td><td>13.4</td></tr>
+<tr><td>3</td><td>19.9</td><td>0.1</td><td>8.2</td></tr>
+<tr><td>4</td><td>20.5</td><td>0.1</td><td>6.2</td></tr>
+<tr><td>8</td><td>19.3</td><td>0.0</td><td>3.5</td></tr>
+</table>
+<p>With barging forbidden, every handoff has to wake someone, and throughput collapses to 0.2 MOPS. With parking removed, the dip disappears. The spin lock never recovers, though, because spinning only gets worse as you add threads, so the recovery from three threads up has to come from parked threads staying parked while running threads barge past them. Java Flight Recorder agrees: two threads park about 0.15 times per operation, four threads about 0.023, roughly 6.6 times less often.</p>
+<p>A fourth copy counted how often the optimistic read of <code>top</code> goes stale and the lock has to be taken again. That happens on 7.5% of acquisitions at two threads and 0.7% from three up. That's ten times higher, but far too small to cause a 3.5x drop on its own. It does fit the picture: at two threads the threads strictly alternate, and at three or more one barging thread takes the lock several times in a row.</p>
+<p>What I still don't understand is why the switch is so sharp, all of it between two and three threads and none of it gradual. That's the next thing I want to take apart, on Linux, where I can pin threads to cores. The variants, the park counter and the raw results are in <a href="https://github.com/brightyorcerf/parallel-universe/tree/main/lockstep/experiments/lockstack-dip">lockstep/experiments/lockstack-dip</a>. If you know why it switches at three, I'd like to hear it.</p>
 
 <h2>What I do differently now</h2>
 <p>Each of these produced a believable number, so "does the output look reasonable" was never going to catch them. What caught them was cross-checking things that should agree: the clock's own throughput against the benchmark's, the requested run time against the measured one, the OpenMP binary on one thread against the sequential binary, and six configurations that should have differed and didn't. The C harness now prints a checksum on every run and refuses to report a time for a result it couldn't verify against the sequential version.</p>
